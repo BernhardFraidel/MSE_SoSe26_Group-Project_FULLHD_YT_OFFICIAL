@@ -1,0 +1,269 @@
+{
+  "visited": [
+    {
+      "url": "https://www.tuebingen.de/en/",
+      "visited_at": "2026-07-06T14:25:12Z",
+      "status_code": 404
+    },
+    {
+      "url": "https://uni-tuebingen.de/en/",
+      "visited_at": "2026-07-06T14:25:13Z",
+      "status_code": 200
+    },
+    {
+      "url": "https://www.tuebingen-info.de/en/",
+      "visited_at": "2026-07-06T14:25:14Z",
+      "status_code": "robots_blocked"
+    },
+    {
+      "url": "https://www.unimuseum.uni-tuebingen.de/en/",
+      "visited_at": "2026-07-06T14:25:15Z",
+      "status_code": 200
+    },
+    {
+      "url": "https://en.wikipedia.org/wiki/T%C3%BCbingen",
+      "visited_at": "2026-07-06T14:25:16Z",
+      "status_code": "robots_blocked"
+    },
+    {
+      "url": "https://en.wikivoyage.org/wiki/T%C3%BCbingen",
+      "visited_at": "2026-07-06T14:25:17Z",
+      "status_code": "robots_blocked"
+    },
+    {
+      "url": "https://alma.uni-tuebingen.de/alma/pages/cs/sys/portal/hisinoneStartPage.faces",
+      "visited_at": "2026-07-06T14:25:18Z",
+      "status_code": "robots_blocked"
+    },
+    {
+      "url": "https://alma.uni-tuebingen.de/alma/rds?state=user&type=0&language=en",
+      "visited_at": "2026-07-06T14:25:18Z",
+      "status_code": "robots_blocked"
+    },
+    {
+      "url": "https://bsky.app/profile/unituebingen.bsky.social",
+      "visited_at": "2026-07-06T14:25:21Z",
+      "status_code": 200
+    },
+    {
+      "url": "https://de.linkedin.com/school/eberhard-karls-universit%C3%A4t-t%C3%BCbingen/",
+      "visited_at": "2026-07-06T14:25:22Z",
+      "status_code": "robots_blocked"
+    },
+    {
+      "url": "https://epv-welt.uni-tuebingen.de/RestrictedPages/StartSearch.aspx",
+      "visited_at": "2026-07-06T14:25:23Z",
+      "status_code": 200
+    },
+    {
+      "url": "https://exchange.uni-tuebingen.de/owa/auth/logon.aspx?replaceCurrent=1&url=https%3a%2f%2fexchange.uni-tuebingen.de%2fowa",
+      "visited_at": "2026-07-06T14:25:24Z",
+      "status_code": 200
+    },
+    {
+      "url": "https://fit.uni-tuebingen.de/",
+      "visited_at": "2026-07-06T14:25:25Z",
+      "status_code": 200
+    },
+    {
+      "url": "https://timms.uni-tuebingen.de/",
+      "visited_at": "2026-07-06T14:25:27Z",
+      "status_code": 200
+    },
+    {
+      "url": "https://uni-tuebingen.de/",
+      "visited_at": "2026-07-06T14:25:28Z",
+      "status_code": 200
+    },
+    {
+      "url": "https://uni-tuebingen.de/en/alumni/",
+      "visited_at": "2026-07-06T14:25:29Z",
+      "status_code": 200
+    },
+    {
+      "url": "https://uni-tuebingen.de/en/alumni/alumni-registration/",
+      "visited_at": "2026-07-06T14:25:30Z",
+      "status_code": 200
+    },
+    {
+      "url": "https://uni-tuebingen.de/en/alumni/contact-us/",
+      "visited_at": "2026-07-06T14:25:31Z",
+      "status_code": 200
+    },
+    {
+      "url": "https://uni-tuebingen.de/en/alumni/engagieren/",
+      "visited_at": "2026-07-06T14:25:31Z",
+      "status_code": 200
+    },
+    {
+      "url": "https://uni-tuebingen.de/en/alumni/from-the-network/",
+      "visited_at": "2026-07-06T14:25:32Z",
+      "status_code": 200
+    },
+    {
+      "url": "https://uni-tuebingen.de/en/alumni/get-involved-1/",
+      "visited_at": "2026-07-06T14:25:33Z",
+      "status_code": 200
+    },
+    {
+      "url": "https://uni-tuebingen.de/en/alumni/get-involved-2/",
+      "visited_at": "2026-07-06T14:25:34Z",
+      "status_code": 200
+    },
+    {
+      "url": "https://uni-tuebingen.de/en/alumni/news/",
+      "visited_at": "2026-07-06T14:25:35Z",
+      "status_code": 200
+    },
+    {
+      "url": "https://uni-tuebingen.de/en/alumni/research-alumni/",
+      "visited_at": "2026-07-06T14:25:36Z",
+      "status_code": 200
+    },
+    {
+      "url": "https://uni-tuebingen.de/en/barrierefreiheit/",
+      "visited_at": "2026-07-06T14:25:37Z",
+      "status_code": 200
+    },
+    {
+      "url": "https://uni-tuebingen.de/en/business/",
+      "visited_at": "2026-07-06T14:25:38Z",
+      "status_code": 200
+    },
+    {
+      "url": "https://uni-tuebingen.de/en/contact/",
+      "visited_at": "2026-07-06T14:25:39Z",
+      "status_code": 200
+    },
+    {
+      "url": "https://uni-tuebingen.de/en/data-privacy-statement/",
+      "visited_at": "2026-07-06T14:25:40Z",
+      "status_code": 200
+    },
+    {
+      "url": "https://uni-tuebingen.de/en/einrichtungen/gleichstellung/beauftragte-fuer-chancengleichheit/",
+      "visited_at": "2026-07-06T14:25:41Z",
+      "status_code": 200
+    },
+    {
+      "url": "https://uni-tuebingen.de/en/einrichtungen/universitaetsbibliothek/weiterbildung/",
+      "visited_at": "2026-07-06T14:25:42Z",
+      "status_code": 200
+    },
+    {
+      "url": "https://uni-tuebingen.de/en/einrichtungen/verwaltung/i-universitaetsentwicklung-struktur-und-recht/abteilung-3-recht/amtliche-bekanntmachungen/",
+      "visited_at": "2026-07-06T14:25:42Z",
+      "status_code": 200
+    },
+    {
+      "url": "https://uni-tuebingen.de/en/einrichtungen/verwaltung/stabsstellen/hochschulkommunikation/corporate-design-1/startseite/",
+      "visited_at": "2026-07-06T14:25:43Z",
+      "status_code": 200
+    },
+    {
+      "url": "https://uni-tuebingen.de/en/einrichtungen/zentrale-anlaufstellen-und-beratungsangebote/betriebliches-gesundheitsmanagement/",
+      "visited_at": "2026-07-06T14:49:06Z",
+      "status_code": 200
+    },
+    {
+      "url": "https://uni-tuebingen.de/en/einrichtungen/zentrale-anlaufstellen-und-beratungsangebote/digital-transformation-lab/",
+      "visited_at": "2026-07-06T14:49:07Z",
+      "status_code": 200
+    },
+    {
+      "url": "https://uni-tuebingen.de/en/einrichtungen/zentrale-anlaufstellen-und-beratungsangebote/jugend-und-auszubildendenvertretung/",
+      "visited_at": "2026-07-06T14:49:08Z",
+      "status_code": 200
+    },
+    {
+      "url": "https://uni-tuebingen.de/en/einrichtungen/zentrale-anlaufstellen-und-beratungsangebote/personalrat-uni-tuebingen/",
+      "visited_at": "2026-07-06T14:49:09Z",
+      "status_code": 200
+    },
+    {
+      "url": "https://uni-tuebingen.de/en/einrichtungen/zentrale-einrichtungen/dr-eberle-zentrum-fuer-digitale-kompetenzen/home/",
+      "visited_at": "2026-07-06T14:49:10Z",
+      "status_code": 200
+    },
+    {
+      "url": "https://uni-tuebingen.de/en/einrichtungen/zentrale-einrichtungen/informations-kommunikations-und-medienzentrum-ikm/e-learning-portal-elp/lernplattformen/",
+      "visited_at": "2026-07-06T14:49:10Z",
+      "status_code": 200
+    },
+    {
+      "url": "https://uni-tuebingen.de/en/einrichtungen/zentrale-einrichtungen/isotopenlabor-strahlenschutz/",
+      "visited_at": "2026-07-06T14:49:11Z",
+      "status_code": 200
+    },
+    {
+      "url": "https://uni-tuebingen.de/en/einrichtungen/zentrale-einrichtungen/tuebingen-school-of-education-tuese/home/",
+      "visited_at": "2026-07-06T14:49:12Z",
+      "status_code": 200
+    },
+    {
+      "url": "https://uni-tuebingen.de/en/einrichtungen/zentrale-einrichtungen/tuebingen-school-of-education-tuese/study-information/",
+      "visited_at": "2026-07-06T14:49:13Z",
+      "status_code": 200
+    },
+    {
+      "url": "https://uni-tuebingen.de/en/einrichtungen/zentrale-einrichtungen/zentrum-fuer-evaluation-und-qualitaetsmanagement/",
+      "visited_at": "2026-07-06T14:49:14Z",
+      "status_code": 200
+    },
+    {
+      "url": "https://uni-tuebingen.de/en/einrichtungen/zentrum-fuer-datenverarbeitung/das-zdv/wir-ueber-uns/",
+      "visited_at": "2026-07-06T14:49:15Z",
+      "status_code": 200
+    },
+    {
+      "url": "https://uni-tuebingen.de/en/einrichtungen/zentrum-fuer-datenverarbeitung/hiddenpages/zustandsansicht/",
+      "visited_at": "2026-07-06T14:49:17Z",
+      "status_code": 200
+    },
+    {
+      "url": "https://uni-tuebingen.de/en/einrichtungen/zentrum-fuer-datenverarbeitung/projekte/laufende-projekte/",
+      "visited_at": "2026-07-06T14:49:18Z",
+      "status_code": 200
+    },
+    {
+      "url": "https://uni-tuebingen.de/en/einrichtungen/zentrum-fuer-datenverarbeitung/support/hotline/",
+      "visited_at": "2026-07-06T14:49:21Z",
+      "status_code": 200
+    },
+    {
+      "url": "https://uni-tuebingen.de/en/en/1",
+      "visited_at": "2026-07-06T14:49:22Z",
+      "status_code": 404
+    },
+    {
+      "url": "https://uni-tuebingen.de/en/excellence-strategy/",
+      "visited_at": "2026-07-06T14:49:22Z",
+      "status_code": 200
+    },
+    {
+      "url": "https://uni-tuebingen.de/en/excellence-strategy/transfer/industry-liaison-office/",
+      "visited_at": "2026-07-06T14:49:23Z",
+      "status_code": 200
+    },
+    {
+      "url": "https://uni-tuebingen.de/en/facilities/",
+      "visited_at": "2026-07-06T14:49:24Z",
+      "status_code": 200
+    },
+    {
+      "url": "https://uni-tuebingen.de/en/facilities/administration/",
+      "visited_at": "2026-07-06T14:49:25Z",
+      "status_code": 200
+    },
+    {
+      "url": "https://uni-tuebingen.de/en/facilities/administration/division-viii-construction-safety-and-environment/",
+      "visited_at": "2026-07-06T14:49:26Z",
+      "status_code": 200
+    },
+    {
+      "url": "https://uni-tuebingen.de/en/facilities/administration/i-development-structure-and-legal-affairs/",
+      "visited_at": "2026-07-06T14:49:27Z",
+      "status_code": 200
+    }
+  ]
+}

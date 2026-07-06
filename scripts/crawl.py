@@ -16,8 +16,19 @@ def main() -> None:
     parser.add_argument("--max-pages", type=int, default=20)
     parser.add_argument("--timeout", type=float, default=8.0)
     parser.add_argument("--polite-delay", type=float, default=0.6)
+    parser.add_argument(
+        "--checkpoint-every",
+        type=int,
+        default=5,
+        help="Write frontier/visited/pages to disk every N attempted fetches, so an interrupted run (Ctrl-C) can be resumed later instead of restarting.",
+    )
     args = parser.parse_args()
-    summary = crawl(max_pages=args.max_pages, timeout=args.timeout, polite_delay=args.polite_delay)
+    summary = crawl(
+        max_pages=args.max_pages,
+        timeout=args.timeout,
+        polite_delay=args.polite_delay,
+        checkpoint_every=args.checkpoint_every,
+    )
     print(summary)
 
 
