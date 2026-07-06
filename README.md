@@ -80,11 +80,12 @@ Example JSON:
 ```json
 {
   "seeds": [
-    {
-      "url": "https://uni-tuebingen.de/en/",
-      "label": "University of Tuebingen",
-      "priority": 1
-    }
+    "https://www.tuebingen.de/en/",
+    "https://uni-tuebingen.de/en/",
+    "https://www.tuebingen-info.de/en/",
+    "https://www.unimuseum.uni-tuebingen.de/en/",
+    "https://en.wikipedia.org/wiki/T%C3%BCbingen",
+    "https://en.wikivoyage.org/wiki/T%C3%BCbingen"
   ]
 }
 ```
