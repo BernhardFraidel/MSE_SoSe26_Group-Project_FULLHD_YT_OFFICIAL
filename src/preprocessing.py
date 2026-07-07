@@ -6,6 +6,9 @@ from typing import Iterable
 
 from src.utils import read_json, short_snippet, write_json
 
+# Unicode-aware tokenizer: matches runs of letters/digits from any script (ä, ö, ü, ß)
+TOKEN_PATTERN = re.compile(r"[^\W_]+", re.UNICODE)
+
 
 FALLBACK_STOPWORDS = {
     "a",
@@ -56,7 +59,8 @@ def _load_stopwords() -> set[str]:
         from nltk.corpus import stopwords
 
         return set(stopwords.words("english")) | FALLBACK_STOPWORDS
-    except Exception:
+    except Exception as exc:
+        print(f"NLTK stopwords unavailable ({exc!r}); using small hardcoded list of {len(FALLBACK_STOPWORDS)} words")
         return FALLBACK_STOPWORDS
 
 
@@ -66,7 +70,8 @@ def _load_stemmer():
         from nltk.stem import PorterStemmer
 
         return PorterStemmer()
-    except Exception:
+    except Exception as exc:
+        print(f"NLTK PorterStemmer unavailable ({exc!r}); stemming will be skipped")
         return None
 
 
@@ -75,7 +80,7 @@ STEMMER = _load_stemmer()
 
 
 def normalize_tuebingen(text: str) -> str:
-    # Normalize all spelling variants of "Tübingen"/"Tuebingen" to a single lowercase form.
+    # Fold all spelling variants of "Tübingen"/"Tuebingen" to one ASCII form to ease search later
     text = text.replace("TÜBINGEN", "tubingen").replace("Tübingen", "tubingen")
     text = text.replace("tübingen", "tubingen")
     text = re.sub(r"\btuebingen\b", "tubingen", text, flags=re.IGNORECASE)
@@ -86,7 +91,7 @@ def normalize_tuebingen(text: str) -> str:
 def preprocess(text: str, use_stemming: bool = True) -> list[str]:
     # Lowercase, normalize, tokenize, strip stopwords/short tokens, and optionally stem the text.
     text = normalize_tuebingen(text or "").lower()
-    tokens = re.findall(r"[a-z0-9]+", text)
+    tokens = TOKEN_PATTERN.findall(text)
     cleaned: list[str] = []
     for token in tokens:
         if token in STOPWORDS or len(token) <= 1:
