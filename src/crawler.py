@@ -31,7 +31,7 @@ def load_seed_urls(seeds_path: str | Path = project_path("seeds.json")) -> list[
     """Read the flat list of seed URLs from seeds.json and normalize them (no priority or title fields)."""
     data = read_json(seeds_path, {"seeds": []})
     seeds = data.get("seeds", [])
-    print(f"[crawl] loaded {len(seeds)} seed urls from {seeds_path}")
+    print(f"loaded {len(seeds)} seed urls from {seeds_path}")
     return [normalize_url(seed) for seed in seeds if seed]
 
 
@@ -116,6 +116,7 @@ class CrawlerState:
         max_pages: int,
         polite_delay: float,
     ) -> None:
+        self.start_time = time.time()
         self.lock = threading.Lock()
         # Queue (deque) for O(1) push/pop from either end, plus a set mirror for O(1) "is this URL already queued" membership checks
         self.frontier: deque[str] = deque(frontier)
@@ -290,25 +291,25 @@ def _save_state(
     write_json(visited_path, {"visited": visited_entries})
 
 
-def _process_url(state: CrawlerState, session: requests.Session, url: str, timeout: float) -> None:
+def _process_url(state: CrawlerState, session: requests.Session, worker_id: int, url: str, timeout: float) -> None:
     """Fetch, parse, and (maybe) save a single URL. Always releases the URL's in-flight/cooldown slot when done."""
     domain = get_domain(url)
     status_code: Any = None
+    reason = "unknown"
     try:
         if not state.robots_allowed(url, USER_AGENT):
-            print(f"[crawl]   blocked by robots.txt: {url}")
             state.record_visited(url, "robots_blocked")
+            reason = "skipped: blocked by robots.txt"
             return
 
         response = session.get(url, timeout=timeout, allow_redirects=True)
         status_code = response.status_code
         fetched_url = normalize_url(response.url)
         content_type = response.headers.get("content-type", "")
-        print(f"[crawl]   status={status_code} content-type={content_type} url={url}")
         state.record_visited(url, status_code)
 
         if status_code != 200 or "text/html" not in content_type.lower():
-            print(f"[crawl]   skipping: not a 200 html response ({url})")
+            reason = f"skipped: not a 200 html response (status={status_code}, content-type={content_type})"
             return
 
         soup = BeautifulSoup(response.text, "html.parser")
@@ -321,13 +322,12 @@ def _process_url(state: CrawlerState, session: requests.Session, url: str, timeo
         html_lang = soup.html.get("lang", "") if soup.html else ""
         language = _detect_language(body, html_lang)
         is_related = _is_tuebingen_related(canonical_url, title, body)
-        print(f"[crawl]   title='{title[:60]}' language={language} tuebingen_related={is_related} links_found={len(outgoing_links)}")
 
         # Queue newly discovered links for later, regardless of whether this page is saved
         state.add_links(outgoing_links)
 
         if not is_related or not _looks_english(canonical_url, language, body):
-            print(f"[crawl]   skipping: not tuebingen-related or not english ({url})")
+            reason = "skipped: not tuebingen-related or not english"
             return
 
         page = {
@@ -344,24 +344,21 @@ def _process_url(state: CrawlerState, session: requests.Session, url: str, timeo
         }
         status, doc_id, total_pages, over_cap = state.try_save_page(canonical_url, page)
         if status == "saved":
-            print(f"[crawl]   saved as doc_id={doc_id} ({total_pages}/{state.max_pages})")
+            reason = f"saved: doc_id={doc_id} ({total_pages}/{state.max_pages} pages)"
             if over_cap:
-                print(
-                    f"[crawl]   note: file now has {total_pages} pages, above max_pages={state.max_pages}. "
-                    "This worker had already fetched and parsed this page before another worker's "
-                    "save reached the cap; already-completed work is saved rather than discarded, "
-                    "so the file can overshoot max_pages by roughly the number of workers :)"
-                )
+                reason += " [over max_pages cap, already-fetched work kept]"
         else:
-            print(f"[crawl]   skipping: canonical url already saved ({canonical_url})")
+            reason = f"skipped: canonical url already saved ({canonical_url})"
     except requests.RequestException as exc:
-        print(f"[crawl]   request error: {exc} ({url})")
+        reason = f"skipped: request error: {exc}"
         state.record_visited(url, status_code or "request_error")
     finally:
+        elapsed_ms = (time.time() - state.start_time) * 1000
+        print(f"worker={worker_id} t+{elapsed_ms:.0f}ms domain={domain} url={url} {reason}")
         state.finish_url(domain, time.time())
 
 
-def _worker_loop(state: CrawlerState, timeout: float, checkpoint_every: int, checkpoint_paths: tuple[Path, Path, Path]) -> None:
+def _worker_loop(state: CrawlerState, worker_id: int, timeout: float, checkpoint_every: int, checkpoint_paths: tuple[Path, Path, Path]) -> None:
     """Main loop for a single worker thread: repeatedly claim a ready URL and process it."""
     session = requests.Session()
     session.headers.update({"User-Agent": USER_AGENT})
@@ -377,13 +374,13 @@ def _worker_loop(state: CrawlerState, timeout: float, checkpoint_every: int, che
             continue
 
         assert url is not None
-        _process_url(state, session, url, timeout)
+        _process_url(state, session, worker_id, url, timeout)
 
         if checkpoint_every > 0 and state.attempted % checkpoint_every == 0:
             raw_pages_path, frontier_path, visited_path = checkpoint_paths
             pages, frontier, visited_entries = state.snapshot_for_checkpoint()
             _save_state(raw_pages_path, frontier_path, visited_path, pages, frontier, visited_entries)
-            print(f"[crawl]   checkpoint saved (attempted={state.attempted}, saved={state.saved}, frontier={len(frontier)})")
+            print(f"checkpoint saved (attempted={state.attempted}, saved={state.saved}, frontier={len(frontier)})")
 
 
 def crawl(
@@ -420,10 +417,11 @@ def crawl(
         visited_entries=visited_entries,
         max_pages=max_pages,
         polite_delay=polite_delay,
+        start_time=start_time,
     )
 
     print(
-        f"[crawl] starting crawl: {len(frontier)} urls in frontier, {len(pages)} pages already saved, "
+        f"starting crawl: {len(frontier)} urls in frontier, {len(pages)} pages already saved, "
         f"max_pages={max_pages}, workers={workers}"
     )
 
@@ -431,7 +429,7 @@ def crawl(
     threads = [
         threading.Thread(
             target=_worker_loop,
-            args=(state, timeout, checkpoint_every, checkpoint_paths),
+            args=(state, i, timeout, checkpoint_every, checkpoint_paths),
             name=f"crawler-worker-{i}",
             daemon=True,
         )
@@ -449,7 +447,7 @@ def crawl(
     except KeyboardInterrupt:
         state.interrupted = True
         state.stop_event.set()
-        print("[crawl] interrupted by user (Ctrl-C) - waiting for in-flight requests to finish, then saving progress so the crawl can be resumed later")
+        print("interrupted by user (Ctrl-C) - waiting for in-flight requests to finish, then saving progress so the crawl can be resumed later")
         for t in threads:
             t.join()
 
@@ -475,7 +473,7 @@ def crawl(
     write_json(raw_pages_path.parent / "crawl_summary.json", summary)
     status = "interrupted" if state.interrupted else "done"
     print(
-        f"[crawl] {status}: saved={state.saved} attempted={state.attempted} "
+        f"{status}: saved={state.saved} attempted={state.attempted} "
         f"frontier_remaining={len(frontier)} elapsed={summary['elapsed_human']}"
     )
     return summary
