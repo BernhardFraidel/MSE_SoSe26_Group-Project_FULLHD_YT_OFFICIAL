@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import threading
 import time
 import urllib.robotparser
 from pathlib import Path
@@ -11,6 +12,7 @@ from bs4 import BeautifulSoup
 from langdetect import detect
 
 from src.utils import (
+    get_domain,
     is_probably_html_url,
     normalize_url,
     now_utc_iso,
@@ -30,28 +32,6 @@ def load_seed_urls(seeds_path: str | Path = project_path("seeds.json")) -> list[
     seeds = data.get("seeds", [])
     print(f"[crawl] loaded {len(seeds)} seed urls from {seeds_path}")
     return [normalize_url(seed) for seed in seeds if seed]
-
-
-def _robots_allowed(url: str, user_agent: str, cache: dict[str, urllib.robotparser.RobotFileParser]) -> bool:
-    """Check robots.txt (cached per host) to see if we're allowed to fetch this URL."""
-    # Fetch and cache the robots.txt parser for this host, so we only download it once
-    parsed = urlparse(url)
-    robots_url = f"{parsed.scheme}://{parsed.netloc}/robots.txt"
-    if robots_url not in cache:
-        parser = urllib.robotparser.RobotFileParser()
-        parser.set_url(robots_url)
-        try:
-            parser.read()
-        except Exception:
-            # If robots.txt can't be fetched/parsed, default to allowing the crawl
-            return True
-        cache[robots_url] = parser
-
-    # Use the cached parser to check if this specific URL is disallowed
-    try:
-        return cache[robots_url].can_fetch(user_agent, url)
-    except Exception:
-        return True
 
 
 def _extract_links(soup: BeautifulSoup, base_url: str) -> list[str]:
@@ -112,6 +92,152 @@ def _looks_english(url: str, language: str, body: str) -> bool:
     return "/en" in urlparse(url).path.lower()
 
 
+def _format_elapsed(seconds: float) -> str:
+    """Format a duration in seconds as a compact H:MM:SS-ish string."""
+    total_seconds = int(seconds)
+    hours, remainder = divmod(total_seconds, 3600)
+    minutes, secs = divmod(remainder, 60)
+    if hours:
+        return f"{hours}h{minutes:02d}m{secs:02d}s"
+    if minutes:
+        return f"{minutes}m{secs:02d}s"
+    return f"{secs}s"
+
+
+class CrawlerState:
+    """All mutable state shared across worker threads, guarded by a single lock"""
+
+    def __init__(
+        self,
+        frontier: list[str],
+        pages: list[dict[str, Any]],
+        visited_entries: list[dict[str, Any]],
+        max_pages: int,
+        polite_delay: float,
+    ) -> None:
+        self.lock = threading.Lock()
+        self.frontier = frontier
+        self.pages = pages
+        self.visited_entries = visited_entries
+        self.visited_urls = {item.get("url") for item in visited_entries}
+        self.known_page_keys = {
+            _url_key(page.get("canonical_url") or page.get("url", ""))
+            for page in pages
+            if page.get("canonical_url") or page.get("url")
+        }
+        self.next_doc_id = max([int(page.get("doc_id", -1)) for page in pages] + [-1]) + 1
+        self.max_pages = max_pages
+        self.polite_delay = polite_delay
+
+        # domain -> earliest timestamp (time.time()) at which we're allowed to fetch it again.
+        self.domain_next_time: dict[str, float] = {}
+
+        self.attempted = 0
+        self.saved = 0
+        self.in_flight = 0  # URLs currently being fetched/processed by a worker
+        self.interrupted = False
+        self.stop_event = threading.Event()
+
+        # robots.txt cache is read/written far less often than the frontier, so it gets its own lock instead of contending with the hot path above.
+        self.robots_lock = threading.Lock()
+        self.robots_cache: dict[str, urllib.robotparser.RobotFileParser] = {}
+
+
+    def claim_next_url(self) -> tuple[str | None, str]:
+        """Try to claim the next URL that is both in the frontier and not on its domain's cooldown.
+
+        Returns (url, "ok") if a URL was claimed (this also marks it in-flight and reserves its domains cooldown slot), (None, "wait") if nothing is ready yet
+        but there's still work outstanding, or (None, "done") if the crawl should stop (max_pages reached, or the frontier is empty with no other worker in-flight
+        that could still add to it).
+        """
+        with self.lock:
+            if self.stop_event.is_set() or self.saved >= self.max_pages:
+                self.stop_event.set()
+                return None, "done"
+
+            now = time.time()
+            i = 0
+            while i < len(self.frontier):
+                url = self.frontier[i]
+                if url in self.visited_urls or not is_probably_html_url(url):
+                    del self.frontier[i]
+                    continue
+                domain = get_domain(url)
+                if now >= self.domain_next_time.get(domain, 0.0):
+                    del self.frontier[i]
+                    # Reserve this domain's next slot immediately, so a second worker can't grab another URL for the same domain before this fetch starts.
+                    self.domain_next_time[domain] = now + self.polite_delay
+                    self.in_flight += 1
+                    self.attempted += 1
+                    return url, "ok"
+                i += 1
+
+            if not self.frontier and self.in_flight == 0:
+                self.stop_event.set()
+                return None, "done"
+            return None, "wait"
+
+    def finish_url(self, domain: str, finished_at: float) -> None:
+        """Release the in-flight slot and make sure the domain's cooldown reflects when the fetch actually completed."""
+        with self.lock:
+            self.in_flight -= 1
+            candidate = finished_at + self.polite_delay
+            if candidate > self.domain_next_time.get(domain, 0.0):
+                self.domain_next_time[domain] = candidate
+
+    def add_links(self, links: list[str]) -> None:
+        with self.lock:
+            for link in links:
+                if link not in self.visited_urls and link not in self.frontier:
+                    self.frontier.append(link)
+
+    def record_visited(self, url: str, status_code: Any) -> None:
+        with self.lock:
+            self.visited_entries.append({"url": url, "visited_at": now_utc_iso(), "status_code": status_code})
+            self.visited_urls.add(url)
+
+    def try_save_page(self, canonical_url: str, page: dict[str, Any]) -> bool:
+        """Save a page if its canonical URL hasn't already been saved. Returns whether it was saved."""
+        with self.lock:
+            canonical_key = _url_key(canonical_url)
+            if canonical_key in self.known_page_keys or self.saved >= self.max_pages:
+                return False
+            page["doc_id"] = self.next_doc_id
+            self.pages.append(page)
+            self.known_page_keys.add(canonical_key)
+            self.next_doc_id += 1
+            self.saved += 1
+            if self.saved >= self.max_pages:
+                self.stop_event.set()
+            return True
+
+    def robots_allowed(self, url: str, user_agent: str) -> bool:
+        """Check robots.txt (cached per host) to see if we're allowed to fetch this URL."""
+        parsed = urlparse(url)
+        robots_url = f"{parsed.scheme}://{parsed.netloc}/robots.txt"
+        with self.robots_lock:
+            parser = self.robots_cache.get(robots_url)
+        if parser is None:
+            parser = urllib.robotparser.RobotFileParser()
+            parser.set_url(robots_url)
+            try:
+                parser.read()
+            except Exception:
+                # If robots.txt can't be fetched/parsed, default to allowing the crawl
+                return True
+            with self.robots_lock:
+                self.robots_cache[robots_url] = parser
+        try:
+            return parser.can_fetch(user_agent, url)
+        except Exception:
+            return True
+
+    def snapshot_for_checkpoint(self) -> tuple[list[dict[str, Any]], list[str], list[dict[str, Any]]]:
+        """Take a consistent, lock-protected copy of everything that gets written to disk."""
+        with self.lock:
+            return list(self.pages), list(self.frontier), list(self.visited_entries)
+
+
 def _save_state(
     raw_pages_path: Path,
     frontier_path: Path,
@@ -132,16 +258,92 @@ def _save_state(
     write_json(visited_path, {"visited": visited_entries})
 
 
-def _format_elapsed(seconds: float) -> str:
-    """Format a duration in seconds as a compact H:MM:SS-ish string."""
-    total_seconds = int(seconds)
-    hours, remainder = divmod(total_seconds, 3600)
-    minutes, secs = divmod(remainder, 60)
-    if hours:
-        return f"{hours}h{minutes:02d}m{secs:02d}s"
-    if minutes:
-        return f"{minutes}m{secs:02d}s"
-    return f"{secs}s"
+def _process_url(state: CrawlerState, session: requests.Session, url: str, timeout: float) -> None:
+    """Fetch, parse, and (maybe) save a single URL. Always releases the URL's in-flight/cooldown slot when done."""
+    domain = get_domain(url)
+    status_code: Any = None
+    try:
+        if not state.robots_allowed(url, USER_AGENT):
+            print(f"[crawl]   blocked by robots.txt: {url}")
+            state.record_visited(url, "robots_blocked")
+            return
+
+        response = session.get(url, timeout=timeout, allow_redirects=True)
+        status_code = response.status_code
+        fetched_url = normalize_url(response.url)
+        content_type = response.headers.get("content-type", "")
+        print(f"[crawl]   status={status_code} content-type={content_type} url={url}")
+        state.record_visited(url, status_code)
+
+        if status_code != 200 or "text/html" not in content_type.lower():
+            print(f"[crawl]   skipping: not a 200 html response ({url})")
+            return
+
+        soup = BeautifulSoup(response.text, "html.parser")
+        canonical = soup.find("link", rel=lambda value: value and "canonical" in value)
+        canonical_url = normalize_url(canonical.get("href"), fetched_url) if canonical and canonical.get("href") else fetched_url
+        title = soup.title.get_text(" ", strip=True) if soup.title else fetched_url
+        headings = [h.get_text(" ", strip=True) for h in soup.find_all(["h1", "h2", "h3"]) if h.get_text(strip=True)]
+        body = _extract_body(soup)
+        outgoing_links = _extract_links(soup, fetched_url)
+        html_lang = soup.html.get("lang", "") if soup.html else ""
+        language = _detect_language(body, html_lang)
+        is_related = _is_tuebingen_related(canonical_url, title, body)
+        print(f"[crawl]   title='{title[:60]}' language={language} tuebingen_related={is_related} links_found={len(outgoing_links)}")
+
+        # Queue newly discovered links for later, regardless of whether this page is saved
+        state.add_links(outgoing_links)
+
+        if not is_related or not _looks_english(canonical_url, language, body):
+            print(f"[crawl]   skipping: not tuebingen-related or not english ({url})")
+            return
+
+        page = {
+            "url": url,
+            "fetched_url": fetched_url,
+            "canonical_url": canonical_url,
+            "title": title,
+            "headings": headings,
+            "body": body,
+            "outgoing_links": outgoing_links,
+            "language": language,
+            "is_tuebingen_related": is_related,
+            "crawl_time": now_utc_iso(),
+        }
+        if state.try_save_page(canonical_url, page):
+            print(f"[crawl]   saved as doc_id={page['doc_id']} ({state.saved}/{state.max_pages})")
+        else:
+            print(f"[crawl]   skipping: canonical url already saved ({canonical_url})")
+    except requests.RequestException as exc:
+        print(f"[crawl]   request error: {exc} ({url})")
+        state.record_visited(url, status_code or "request_error")
+    finally:
+        state.finish_url(domain, time.time())
+
+
+def _worker_loop(state: CrawlerState, timeout: float, checkpoint_every: int, checkpoint_paths: tuple[Path, Path, Path]) -> None:
+    """Main loop for a single worker thread: repeatedly claim a ready URL and process it."""
+    session = requests.Session()
+    session.headers.update({"User-Agent": USER_AGENT})
+    while not state.stop_event.is_set():
+        url, status = state.claim_next_url()
+        if status == "done":
+            return
+        if status == "wait":
+            # Nothing is ready right now (either the frontier is empty but other
+            # workers are still in-flight and might add to it, or every candidate
+            # domain is on cooldown). Back off briefly and try again.
+            time.sleep(0.05)
+            continue
+
+        assert url is not None
+        _process_url(state, session, url, timeout)
+
+        if checkpoint_every > 0 and state.attempted % checkpoint_every == 0:
+            raw_pages_path, frontier_path, visited_path = checkpoint_paths
+            pages, frontier, visited_entries = state.snapshot_for_checkpoint()
+            _save_state(raw_pages_path, frontier_path, visited_path, pages, frontier, visited_entries)
+            print(f"[crawl]   checkpoint saved (attempted={state.attempted}, saved={state.saved}, frontier={len(frontier)})")
 
 
 def crawl(
@@ -153,9 +355,9 @@ def crawl(
     timeout: float = 8.0,
     polite_delay: float = 0.6,
     checkpoint_every: int = 5,
+    workers: int = 4,
 ) -> dict[str, Any]:
-    """Run the crawl loop: fetch frontier URLs, filter/save relevant pages, and persist crawler state."""
-    # Resolve output paths
+    """Run the crawl: fetch frontier URLs with `workers` concurrent threads, filter/save relevant pages, and persist crawler state."""
     raw_pages_path = Path(raw_pages_path)
     frontier_path = Path(frontier_path)
     visited_path = Path(visited_path)
@@ -171,139 +373,69 @@ def crawl(
     # Load which URLs were already visited, so we don't refetch them across runs
     visited_data = read_json(visited_path, {"visited": []})
     visited_entries = visited_data.get("visited", [])
-    visited_urls = {item.get("url") for item in visited_entries}
-    # Build a lookup of already-saved pages by canonical URL, so duplicate content is skipped
-    known_page_keys = {
-        _url_key(page.get("canonical_url") or page.get("url", ""))
-        for page in pages
-        if page.get("canonical_url") or page.get("url")
-    }
-    # Set up per-run state (robots.txt cache, counters, HTTP session)
-    robot_cache: dict[str, urllib.robotparser.RobotFileParser] = {}
-    attempted = 0
-    saved = 0
-    next_doc_id = max([int(page.get("doc_id", -1)) for page in pages] + [-1]) + 1
-    session = requests.Session()
-    session.headers.update({"User-Agent": USER_AGENT})
 
-    print(f"[crawl] starting crawl: {len(frontier)} urls in frontier, {len(pages)} pages already saved, max_pages={max_pages}")
+    state = CrawlerState(
+        frontier=frontier,
+        pages=pages,
+        visited_entries=visited_entries,
+        max_pages=max_pages,
+        polite_delay=polite_delay,
+    )
 
-    interrupted = False
+    print(
+        f"[crawl] starting crawl: {len(frontier)} urls in frontier, {len(pages)} pages already saved, "
+        f"max_pages={max_pages}, workers={workers}"
+    )
+
+    checkpoint_paths = (raw_pages_path, frontier_path, visited_path)
+    threads = [
+        threading.Thread(
+            target=_worker_loop,
+            args=(state, timeout, checkpoint_every, checkpoint_paths),
+            name=f"crawler-worker-{i}",
+            daemon=True,
+        )
+        for i in range(max(1, workers))
+    ]
+
+    for t in threads:
+        t.start()
+
     try:
-        while frontier and saved < max_pages:
-            # Dequeue the next candidate URL (normalize_url also upgrades http:// to https://, so we don't fetch the same page twice just because it appears in both schemes)
-            url = normalize_url(frontier.pop(0))
-            if url in visited_urls or not is_probably_html_url(url):
-                continue
-            attempted += 1
-            print(f"[crawl] #{attempted} fetching: {url}")
-
-            status_code = None
-            try:
-                # Respect robots.txt before fetching anything
-                if not _robots_allowed(url, USER_AGENT, robot_cache):
-                    print(f"[crawl]   blocked by robots.txt: {url}")
-                    visited_entries.append({"url": url, "visited_at": now_utc_iso(), "status_code": "robots_blocked"})
-                    visited_urls.add(url)
-                    continue
-
-                # Fetch the page and record that we've visited it, regardless of outcome
-                response = session.get(url, timeout=timeout, allow_redirects=True)
-                status_code = response.status_code
-                fetched_url = normalize_url(response.url)
-                content_type = response.headers.get("content-type", "")
-                print(f"[crawl]   status={status_code} content-type={content_type}")
-                visited_entries.append({"url": url, "visited_at": now_utc_iso(), "status_code": status_code})
-                visited_urls.add(url)
-
-                # Only continue parsing successful, actual HTML responses
-                if status_code != 200 or "text/html" not in content_type.lower():
-                    print(f"[crawl]   skipping: not a 200 html response")
-                    continue
-
-                # Parse the page and pull out everything we need
-                soup = BeautifulSoup(response.text, "html.parser")
-                canonical = soup.find("link", rel=lambda value: value and "canonical" in value)
-                canonical_url = normalize_url(canonical.get("href"), fetched_url) if canonical and canonical.get("href") else fetched_url
-                title = soup.title.get_text(" ", strip=True) if soup.title else fetched_url
-                headings = [h.get_text(" ", strip=True) for h in soup.find_all(["h1", "h2", "h3"]) if h.get_text(strip=True)]
-                body = _extract_body(soup)
-                outgoing_links = _extract_links(soup, fetched_url)
-                html_lang = soup.html.get("lang", "") if soup.html else ""
-                language = _detect_language(body, html_lang)
-                is_related = _is_tuebingen_related(canonical_url, title, body)
-                print(f"[crawl]   title='{title[:60]}' language={language} tuebingen_related={is_related} links_found={len(outgoing_links)}")
-
-                # Queue newly discovered links for later, regardless of whether this page is saved
-                for link in outgoing_links:
-                    if link not in visited_urls and link not in frontier and len(frontier) < 1000:
-                        frontier.append(link)
-
-                # Only keep pages that are actually Tuebingen-related, English, and not already saved
-                if not is_related or not _looks_english(canonical_url, language, body):
-                    print(f"[crawl]   skipping: not tuebingen-related or not english")
-                    continue
-                canonical_key = _url_key(canonical_url)
-                if canonical_key in known_page_keys:
-                    print(f"[crawl]   skipping: canonical url already saved ({canonical_url})")
-                    continue
-
-                # Store the page
-                pages.append(
-                    {
-                        "doc_id": next_doc_id,
-                        "url": url,
-                        "fetched_url": fetched_url,
-                        "canonical_url": canonical_url,
-                        "title": title,
-                        "headings": headings[:20],
-                        "body": body,
-                        "outgoing_links": outgoing_links[:200],
-                        "language": language,
-                        "is_tuebingen_related": is_related,
-                        "crawl_time": now_utc_iso(),
-                    }
-                )
-                known_page_keys.add(canonical_key)
-                print(f"[crawl]   saved as doc_id={next_doc_id} ({saved + 1}/{max_pages})")
-                next_doc_id += 1
-                saved += 1
-            except requests.RequestException as exc:
-                # Network/timeout errors: mark as visited so we don't keep retrying a dead URL
-                print(f"[crawl]   request error: {exc}")
-                visited_entries.append({"url": url, "visited_at": now_utc_iso(), "status_code": status_code or "request_error"})
-                visited_urls.add(url)
-            finally:
-                # Always wait between requests, even on failure, to stay polite to the server
-                time.sleep(polite_delay)
-
-            # Periodically checkpoint progress to disk so an interruption doesn't lose everything
-            # fetched since the last checkpoint. This is what makes the crawl resumable.
-            if checkpoint_every > 0 and attempted % checkpoint_every == 0:
-                _save_state(raw_pages_path, frontier_path, visited_path, pages, frontier, visited_entries)
-                print(f"[crawl]   checkpoint saved (attempted={attempted}, saved={saved}, frontier={len(frontier)})")
+        # Poll instead of a plain join() so Ctrl-C reaches the main thread promptly even though the actual work is happening on daemon worker threads.
+        while any(t.is_alive() for t in threads):
+            for t in threads:
+                t.join(timeout=0.2)
     except KeyboardInterrupt:
-        interrupted = True
-        print("[crawl] interrupted by user (Ctrl-C) - saving progress so the crawl can be resumed later")
+        state.interrupted = True
+        state.stop_event.set()
+        print("[crawl] interrupted by user (Ctrl-C) - waiting for in-flight requests to finish, then saving progress so the crawl can be resumed later")
+        for t in threads:
+            t.join()
+
+    pages, frontier, visited_entries = state.snapshot_for_checkpoint()
 
     # Persist crawler state to disk so subsequent runs can resume where this one left off.
-    # This also serves as the final checkpoint for a normal (non-interrupted) completion.
     _save_state(raw_pages_path, frontier_path, visited_path, pages, frontier, visited_entries)
     elapsed_seconds = time.time() - start_time
     summary = {
         "step": "crawling",
-        "saved_pages": saved,
+        "saved_pages": state.saved,
         "total_pages": len(pages),
-        "attempted_urls": attempted,
+        "attempted_urls": state.attempted,
         "frontier_size": len(frontier),
         "visited_size": len(visited_entries),
         "timeout": timeout,
         "polite_delay": polite_delay,
-        "interrupted": interrupted,
+        "workers": workers,
+        "interrupted": state.interrupted,
         "elapsed_seconds": round(elapsed_seconds, 2),
         "elapsed_human": _format_elapsed(elapsed_seconds),
     }
     write_json(raw_pages_path.parent / "crawl_summary.json", summary)
-    status = "interrupted" if interrupted else "done"
-    print(f"[crawl] {status}: saved={saved} attempted={attempted} frontier_remaining={len(frontier)} elapsed={summary['elapsed_human']}")
+    status = "interrupted" if state.interrupted else "done"
+    print(
+        f"[crawl] {status}: saved={state.saved} attempted={state.attempted} "
+        f"frontier_remaining={len(frontier)} elapsed={summary['elapsed_human']}"
+    )
     return summary
