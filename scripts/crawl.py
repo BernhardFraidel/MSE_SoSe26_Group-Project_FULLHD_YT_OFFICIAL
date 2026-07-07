@@ -13,19 +13,30 @@ from src.crawler import crawl
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Crawl English Tuebingen-related web pages.")
-    parser.add_argument("--max-pages", type=int, default=20)
+    parser.add_argument(
+        "--max-pages",
+        dest="max_pages",
+        type=int,
+        default=1000,
+        help=(
+            "Maximum number of pages allowed in the saved pages file (raw_pages.json), "
+            "counting pages already saved from previous runs. If the file already has "
+            "this many pages (or more), the crawl stops immediately without fetching. "
+            "Otherwise it keeps crawling until the file reaches this many pages."
+        ),
+    )
     parser.add_argument("--timeout", type=float, default=8.0)
     parser.add_argument(
         "--polite-delay",
         type=float,
-        default=0.6,
+        default=1.0,
         help="Minimum seconds between two requests to the same domain (subdomains share one timer). Not a global delay - different domains are fetched concurrently.",
     )
     parser.add_argument(
         "--workers",
         type=int,
         default=8,
-        help="Number of concurrent worker threads fetching pages. Each domain is still only fetched at most once per --polite-delay seconds, regardless of worker count.",
+        help="Number of concurrent worker threads fetching pages.",
     )
     parser.add_argument(
         "--checkpoint-every",

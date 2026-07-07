@@ -151,7 +151,7 @@ class CrawlerState:
         that could still add to it).
         """
         with self.lock:
-            if self.stop_event.is_set() or self.saved >= self.max_pages:
+            if self.stop_event.is_set() or len(self.pages) >= self.max_pages:
                 self.stop_event.set()
                 return None, "done"
 
@@ -196,20 +196,22 @@ class CrawlerState:
             self.visited_entries.append({"url": url, "visited_at": now_utc_iso(), "status_code": status_code})
             self.visited_urls.add(url)
 
-    def try_save_page(self, canonical_url: str, page: dict[str, Any]) -> bool:
-        """Save a page if its canonical URL hasn't already been saved. Returns whether it was saved."""
+    def try_save_page(self, canonical_url: str, page: dict[str, Any]) -> str:
+        """Try to save a page. Returns "saved", "cap_reached" (max_pages already hit, possibly by another worker), or "duplicate" (canonical URL was already saved)."""
         with self.lock:
+            if len(self.pages) >= self.max_pages:
+                return "cap_reached"
             canonical_key = _url_key(canonical_url)
-            if canonical_key in self.known_page_keys or self.saved >= self.max_pages:
-                return False
+            if canonical_key in self.known_page_keys:
+                return "duplicate"
             page["doc_id"] = self.next_doc_id
             self.pages.append(page)
             self.known_page_keys.add(canonical_key)
             self.next_doc_id += 1
             self.saved += 1
-            if self.saved >= self.max_pages:
+            if len(self.pages) >= self.max_pages:
                 self.stop_event.set()
-            return True
+            return "saved"
 
     def robots_allowed(self, url: str, user_agent: str) -> bool:
         """Check robots.txt (cached per host) to see if we're allowed to fetch this URL."""
@@ -310,8 +312,11 @@ def _process_url(state: CrawlerState, session: requests.Session, url: str, timeo
             "is_tuebingen_related": is_related,
             "crawl_time": now_utc_iso(),
         }
-        if state.try_save_page(canonical_url, page):
-            print(f"[crawl]   saved as doc_id={page['doc_id']} ({state.saved}/{state.max_pages})")
+        result = state.try_save_page(canonical_url, page)
+        if result == "saved":
+            print(f"[crawl]   saved as doc_id={page['doc_id']} ({len(state.pages)}/{state.max_pages})")
+        elif result == "cap_reached":
+            print(f"[crawl]   skipping: max_pages ({state.max_pages}) already reached by another worker ({url})")
         else:
             print(f"[crawl]   skipping: canonical url already saved ({canonical_url})")
     except requests.RequestException as exc:
@@ -333,7 +338,7 @@ def _worker_loop(state: CrawlerState, timeout: float, checkpoint_every: int, che
             # Nothing is ready right now (either the frontier is empty but other
             # workers are still in-flight and might add to it, or every candidate
             # domain is on cooldown). Back off briefly and try again.
-            time.sleep(0.05)
+            time.sleep(0.1)
             continue
 
         assert url is not None
