@@ -9,48 +9,29 @@ from src.utils import read_json, short_snippet, write_json
 # Unicode-aware tokenizer: matches runs of letters/digits from any script (ä, ö, ü, ß)
 TOKEN_PATTERN = re.compile(r"[^\W_]+", re.UNICODE)
 
-
-FALLBACK_STOPWORDS = {
-    "a",
-    "an",
-    "and",
-    "are",
-    "as",
-    "at",
-    "be",
-    "by",
-    "for",
-    "from",
-    "has",
-    "have",
-    "in",
-    "is",
-    "it",
-    "its",
-    "of",
-    "on",
-    "or",
-    "that",
-    "the",
-    "this",
-    "to",
-    "was",
-    "were",
-    "with",
-    "you",
-    "your",
-    "we",
-    "our",
-    "can",
-    "will",
-    "not",
-    "more",
-    "about",
-    "into",
-    "also",
-    "their",
-    "they",
+ENGLISH_STOPWORDS = {
+    "a", "an", "and", "are", "as", "at", "be", "been", "being", "by",
+    "can", "cannot", "could", "did", "do", "does", "doing", "down", "during", "each",
+    "few", "for", "from", "further", "had", "has", "have", "having", "he", "her",
+    "here", "hers", "herself", "him", "himself", "his", "how", "i", "if", "in",
+    "into", "is", "it", "its", "itself", "just", "me", "more", "most", "my",
+    "myself", "no", "nor", "not", "of", "off", "on", "once", "only", "or",
+    "other", "our", "ours", "ourselves", "out", "over", "own", "same", "she", "should",
+    "so", "some", "such", "than", "that", "the", "their", "theirs", "them", "themselves",
+    "then", "there", "these", "they", "this", "those", "through", "to", "too", "under",
+    "until", "up", "very", "was", "we", "were", "what", "when", "where", "which",
+    "while", "who", "whom", "why", "will", "with", "you", "your", "yours", "yourself",
 }
+
+GERMAN_STOPWORDS = {
+    "aber", "alle", "als", "also", "am", "an", "auch", "auf", "aus", "bei",
+    "bin", "bis", "bist", "da", "damit", "dann", "das", "dass", "dein", "deine",
+    "dem", "den", "der", "des", "dich", "die", "dies", "diese", "dieser", "dieses",
+    "doch", "dort", "du", "durch", "ein", "eine", "einen", "einer", "eines", "er",
+    "es", "euch", "eure", "für", "hatte", "hatten", "hier", "ich", "ihm", "ihn",
+}
+
+FALLBACK_STOPWORDS = ENGLISH_STOPWORDS | GERMAN_STOPWORDS
 
 
 def _load_stopwords() -> set[str]:
