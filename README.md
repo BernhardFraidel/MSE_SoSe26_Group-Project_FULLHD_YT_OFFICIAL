@@ -37,6 +37,7 @@ mse-tuebingen-search/
 |   `-- app.py
 `-- scripts/
     |-- crawl.py
+    |-- preprocess.py
     |-- build_index.py
     |-- run_batch.py
     `-- smoke_test.py
@@ -51,12 +52,12 @@ mse-tuebingen-search/
 - `data/visited.json`: URLs already visited.
 - `data/index.json`: readable index representation for the initial project stage.
 - `data/crawl_summary.json`: crawl statistics.
-- `data/preprocessed_pages.json`: token preview after preprocessing.
+- `data/preprocessed_pages.json`: tokenized document fields after preprocessing.
 - `data/index_summary.json`: index statistics.
 - `data/results.json`: batch retrieval results.
 - `data/batch_summary.json`: compact batch retrieval summary.
 - `src/crawler.py`: crawling, URL filtering, page extraction.
-- `src/preprocessing.py`: tokenization, normalization, stopword removal, optional stemming.
+- `src/preprocessing.py`: tokenization, normalization, stopword removal, and NLTK Porter stemming.
 - `src/text_representations.py`: term frequency, document frequency, IDF helpers.
 - `src/indexer.py`: inverted index construction.
 - `src/retrieval.py`: BM25 retrieval.
@@ -64,7 +65,7 @@ mse-tuebingen-search/
 - `src/batch.py`: batch retrieval export.
 - `src/utils.py`: shared helper functions.
 - `frontend/app.py`: Streamlit user interface.
-- `scripts/`: simple command-line entry points.
+- `scripts/`: simple command-line entry points for crawling, preprocessing, indexing, batch retrieval, and smoke testing.
 
 ## Pipeline Stages
 
@@ -160,9 +161,12 @@ Example JSON for `data/crawl_summary.json`:
 ### 3. Preprocessing
 
 - Input: raw page text from `data/raw_pages.json`
-- Processing: lowercase, tokenize, remove punctuation, normalize Tuebingen spelling variants, remove stopwords, apply optional stemming
-- Output: token preview in `data/preprocessed_pages.json`
-- Files: `src/preprocessing.py`
+- Processing: lowercase, tokenize, remove punctuation, normalize Tuebingen spelling variants, normalize German umlauts, remove stopwords, apply NLTK Porter stemming
+- Tuebingen normalization must map common spelling variants and common encoding artifacts to `tubingen`, including `Tübingen`, `Tuebingen`, `Tubingen`, `TÃ¼bingen`, and `TÃœBINGEN`
+- General German character normalization should also be applied before tokenization, for example `ä -> ae` or `a`, `ö -> oe` or `o`, `ü -> ue` or `u`, and `ß -> ss`
+- The indexer and retrieval code must use the same `preprocess(...)` function, so document tokens and query tokens are normalized, filtered, and stemmed in exactly the same way
+- Output: tokenized document fields in `data/preprocessed_pages.json`
+- Files: `src/preprocessing.py`, `scripts/preprocess.py`
 
 Example JSON:
 
@@ -172,11 +176,15 @@ Example JSON:
     {
       "doc_id": 0,
       "url": "https://uni-tuebingen.de/en/",
+      "canonical_url": "https://uni-tuebingen.de/en",
       "title": "Home | University of Tuebingen",
       "title_tokens": ["home", "univers", "tubingen"],
       "heading_tokens": ["univers", "tubingen"],
+      "body_tokens": ["student", "research", "campus"],
       "body_tokens_preview": ["student", "research", "campus"],
-      "body_length": 320
+      "body_length": 320,
+      "outgoing_links": ["https://uni-tuebingen.de/en/study"],
+      "crawl_time": "2026-07-05T12:00:00Z"
     }
   ]
 }
@@ -245,7 +253,7 @@ Example JSON for `data/index_summary.json`:
 ### 5. Retrieval / BM25
 
 - Input: query from `queries.json` or the UI, plus `data/index.json`
-- Processing: preprocess query, score documents with manually implemented BM25, retrieve top candidates and attach document metadata such as title, URL, and snippet
+- Processing: preprocess query with the same `preprocess(...)` function used for documents, score documents with manually implemented BM25, retrieve top candidates and attach document metadata such as title, URL, and snippet
 - Output: first-stage ranked result list
 - Files: `src/retrieval.py`, `src/preprocessing.py`
 
