@@ -416,8 +416,7 @@ def crawl(
         pages=pages,
         visited_entries=visited_entries,
         max_pages=max_pages,
-        polite_delay=polite_delay,
-        start_time=start_time,
+        polite_delay=polite_delay
     )
 
     print(
