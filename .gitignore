@@ -226,3 +226,7 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+data/visited.json
+data/raw_pages.json
+data/frontier.json
+data/crawl_summary.json
