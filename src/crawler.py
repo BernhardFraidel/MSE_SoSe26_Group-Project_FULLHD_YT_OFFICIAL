@@ -115,6 +115,7 @@ class CrawlerState:
         visited_entries: list[dict[str, Any]],
         max_pages: int,
         polite_delay: float,
+        checkpoint_every: int,
     ) -> None:
         self.start_time = time.time()
         self.lock = threading.Lock()
@@ -132,6 +133,8 @@ class CrawlerState:
         self.next_doc_id = max([int(page.get("doc_id", -1)) for page in pages] + [-1]) + 1
         self.max_pages = max_pages
         self.polite_delay = polite_delay
+        self.checkpoint_every = checkpoint_every
+        self.next_checkpoint_at = checkpoint_every if checkpoint_every > 0 else None
 
         # domain -> earliest timestamp (time.time()) at which we're allowed to fetch it again.
         self.domain_next_time: dict[str, float] = {}
@@ -265,6 +268,16 @@ class CrawlerState:
         except Exception:
             return True
 
+    def should_checkpoint(self) -> bool:
+        """Decide whether the calling worker is the one that should run the next checkpoint."""
+        if self.next_checkpoint_at is None:
+            return False
+        with self.lock:
+            if self.attempted >= self.next_checkpoint_at:
+                self.next_checkpoint_at += self.checkpoint_every
+                return True
+            return False
+
     def snapshot_for_checkpoint(self) -> tuple[list[dict[str, Any]], list[str], list[dict[str, Any]]]:
         """Take a consistent, lock-protected copy of everything that gets written to disk."""
         with self.lock:
@@ -358,7 +371,7 @@ def _process_url(state: CrawlerState, session: requests.Session, worker_id: int,
         state.finish_url(domain, time.time())
 
 
-def _worker_loop(state: CrawlerState, worker_id: int, timeout: float, checkpoint_every: int, checkpoint_paths: tuple[Path, Path, Path]) -> None:
+def _worker_loop(state: CrawlerState, worker_id: int, timeout: float, checkpoint_paths: tuple[Path, Path, Path]) -> None:
     """Main loop for a single worker thread: repeatedly claim a ready URL and process it."""
     session = requests.Session()
     session.headers.update({"User-Agent": USER_AGENT})
@@ -376,7 +389,7 @@ def _worker_loop(state: CrawlerState, worker_id: int, timeout: float, checkpoint
         assert url is not None
         _process_url(state, session, worker_id, url, timeout)
 
-        if checkpoint_every > 0 and state.attempted % checkpoint_every == 0:
+        if state.should_checkpoint():
             raw_pages_path, frontier_path, visited_path = checkpoint_paths
             pages, frontier, visited_entries = state.snapshot_for_checkpoint()
             _save_state(raw_pages_path, frontier_path, visited_path, pages, frontier, visited_entries)
@@ -416,7 +429,8 @@ def crawl(
         pages=pages,
         visited_entries=visited_entries,
         max_pages=max_pages,
-        polite_delay=polite_delay
+        polite_delay=polite_delay,
+        checkpoint_every=checkpoint_every,
     )
 
     print(
@@ -428,7 +442,7 @@ def crawl(
     threads = [
         threading.Thread(
             target=_worker_loop,
-            args=(state, i, timeout, checkpoint_every, checkpoint_paths),
+            args=(state, i, timeout, checkpoint_paths),
             name=f"crawler-worker-{i}",
             daemon=True,
         )
