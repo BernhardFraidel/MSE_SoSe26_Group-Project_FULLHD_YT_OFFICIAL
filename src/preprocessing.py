@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import re
+import time
+from functools import lru_cache
 from pathlib import Path
 from typing import Iterable
 
@@ -8,6 +10,15 @@ from src.utils import read_json, short_snippet, write_json
 
 # Unicode-aware tokenizer: matches runs of letters/digits from any script (ä, ö, ü, ß)
 TOKEN_PATTERN = re.compile(r"[^\W_]+", re.UNICODE)
+
+# Precompiled patterns for Tübingen spelling normalization (avoids recompiling on every call)
+TUEBINGEN_UMLAUT_RE = re.compile(r"tübingen", re.IGNORECASE)
+TUEBINGEN_ASCII_RE = re.compile(r"\btuebingen\b", re.IGNORECASE)
+TUEBINGEN_UBINGEN_RE = re.compile(r"\btubingen\b", re.IGNORECASE)
+
+# Path to the stats output file: <project>/data/preprocessor_summary.json
+# This file lives at <project>/src/preprocessing.py, so we go up one level to <project>/
+SUMMARY_OUTPUT_PATH = Path(__file__).resolve().parent.parent / "data" / "preprocessor_summary.json"
 
 ENGLISH_STOPWORDS = {
     "a", "an", "and", "are", "as", "at", "be", "been", "being", "by",
@@ -60,12 +71,17 @@ STOPWORDS = _load_stopwords()
 STEMMER = _load_stemmer()
 
 
+@lru_cache(maxsize=5000)
+def _stem_cached(token: str) -> str:
+    # Cache stemming results (bounded at 5000 entries) since the same tokens recur constantly across pages.
+    return STEMMER.stem(token)
+
+
 def normalize_tuebingen(text: str) -> str:
-    # Fold all spelling variants of "Tübingen"/"Tuebingen" to one ASCII form to ease search later
-    text = text.replace("TÜBINGEN", "tubingen").replace("Tübingen", "tubingen")
-    text = text.replace("tübingen", "tubingen")
-    text = re.sub(r"\btuebingen\b", "tubingen", text, flags=re.IGNORECASE)
-    text = re.sub(r"\btubingen\b", "tubingen", text, flags=re.IGNORECASE)
+    # Fold all spelling variants of "Tübingen"/"Tuebingen" to one ASCII form to ease search later.
+    text = TUEBINGEN_UMLAUT_RE.sub("tubingen", text)
+    text = TUEBINGEN_ASCII_RE.sub("tubingen", text)
+    text = TUEBINGEN_UBINGEN_RE.sub("tubingen", text)
     return text
 
 
@@ -73,12 +89,14 @@ def preprocess(text: str, use_stemming: bool = True) -> list[str]:
     # Lowercase, normalize, tokenize, strip stopwords/short tokens, and optionally stem the text.
     text = normalize_tuebingen(text or "").lower()
     tokens = TOKEN_PATTERN.findall(text)
+    should_stem = use_stemming and STEMMER is not None
+
     cleaned: list[str] = []
     for token in tokens:
         if token in STOPWORDS or len(token) <= 1:
             continue
-        if use_stemming and STEMMER is not None and token != "tubingen":
-            token = STEMMER.stem(token)
+        if should_stem and token != "tubingen":
+            token = _stem_cached(token)
         cleaned.append(token)
     return cleaned
 
@@ -90,12 +108,16 @@ def tokens_from_list(values: Iterable[str]) -> list[str]:
 
 def create_preprocessed_pages(raw_pages_path: str | Path, output_path: str | Path) -> dict:
     # Load raw page data, preprocess each page's text fields, and write the results to JSON.
+    start_time = time.perf_counter()
+
     raw = read_json(raw_pages_path, {"pages": []})
     documents = []
+    total_body_tokens = 0
     for page in raw.get("pages", []):
         title_tokens = preprocess(page.get("title", ""))
         heading_tokens = tokens_from_list(page.get("headings", []))
         body_tokens = preprocess(page.get("body", ""))
+        total_body_tokens += len(body_tokens)
         documents.append(
             {
                 "doc_id": page.get("doc_id"),
@@ -110,4 +132,23 @@ def create_preprocessed_pages(raw_pages_path: str | Path, output_path: str | Pat
         )
     output = {"documents": documents}
     write_json(output_path, output)
+
+    elapsed_seconds = time.perf_counter() - start_time
+    print(f"preprocess: processed {len(documents)} pages in {elapsed_seconds:.3f}s")
+
+    cache_info = _stem_cached.cache_info()
+    summary = {
+        "num_pages": len(documents),
+        "total_body_tokens": total_body_tokens,
+        "elapsed_seconds": elapsed_seconds,
+        "stemming_cache": {
+            "hits": cache_info.hits,
+            "misses": cache_info.misses,
+            "maxsize": cache_info.maxsize,
+            "currsize": cache_info.currsize,
+        },
+    }
+    SUMMARY_OUTPUT_PATH.parent.mkdir(parents=True, exist_ok=True)
+    write_json(SUMMARY_OUTPUT_PATH, summary)
+
     return output
