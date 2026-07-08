@@ -175,7 +175,11 @@ class CrawlerState:
                 if url in self.visited_urls or not is_probably_html_url(url):
                     continue
 
-                domain = get_domain(url)
+                try:
+                    domain = get_domain(url)
+                except Exception:
+                    # Malformed URL slipped into the frontier (e.g. from a bad extracted link) - drop it rather than let it crash a worker while holding state.lock.
+                    continue
                 if now >= self.domain_next_time.get(domain, 0.0):
                     # Reserve this domain's next slot immediately, so a second worker can't grab another URL for the same domain before this fetch starts.
                     self.domain_next_time[domain] = now + self.polite_delay
@@ -320,11 +324,12 @@ def _save_state(
 
 def _process_url(state: CrawlerState, session: requests.Session, worker_id: int, url: str, timeout: float) -> None:
     """Fetch, parse, and (maybe) save a single URL. Always releases the URL's in-flight/cooldown slot when done."""
-    domain = get_domain(url)
+    domain = "unknown"
     status_code: Any = None
     reason = "unknown"
     visited_recorded = False
     try:
+        domain = get_domain(url)
         if not state.robots_allowed(url, USER_AGENT, session, timeout):
             state.record_visited(url, "robots_blocked")
             visited_recorded = True
@@ -398,7 +403,17 @@ def _worker_loop(state: CrawlerState, worker_id: int, timeout: float, checkpoint
     session = requests.Session()
     session.headers.update({"User-Agent": USER_AGENT})
     while not state.stop_event.is_set():
-        url, status = state.claim_next_url()
+        try:
+            url, status = state.claim_next_url()
+        except Exception as exc:
+            # claim_next_url() guards its own risky calls, so this shouldn't fire -
+            # but an uncaught exception here would silently kill this thread, and a
+            # dead worker permanently loses its share of concurrency. Log and retry
+            # rather than let the thread disappear.
+            print(f"worker={worker_id} error claiming next url: {type(exc).__name__}: {exc}")
+            time.sleep(0.05)
+            continue
+
         if status == "done":
             return
         if status == "wait":
@@ -409,13 +424,20 @@ def _worker_loop(state: CrawlerState, worker_id: int, timeout: float, checkpoint
             continue
 
         assert url is not None
-        _process_url(state, session, worker_id, url, timeout)
+        try:
+            _process_url(state, session, worker_id, url, timeout)
+        except Exception as exc:
+            print(f"worker={worker_id} unexpected crash processing {url}: {type(exc).__name__}: {exc}")
 
-        if state.should_checkpoint():
-            raw_pages_path, frontier_path, visited_path = checkpoint_paths
-            pages, frontier, visited_entries = state.snapshot_for_checkpoint()
-            _save_state(raw_pages_path, frontier_path, visited_path, pages, frontier, visited_entries)
-            print(f"checkpoint saved (attempted={state.attempted}, saved={state.saved}, frontier={len(frontier)})")
+        try:
+            if state.should_checkpoint():
+                raw_pages_path, frontier_path, visited_path = checkpoint_paths
+                pages, frontier, visited_entries = state.snapshot_for_checkpoint()
+                _save_state(raw_pages_path, frontier_path, visited_path, pages, frontier, visited_entries)
+                print(f"checkpoint saved (attempted={state.attempted}, saved={state.saved}, frontier={len(frontier)})")
+        except Exception as exc:
+            # Disk-full, permissions, or a stray non-serializable value shouldn't be able to kill a worker thread.
+            print(f"worker={worker_id} checkpoint save failed: {type(exc).__name__}: {exc}")
 
 
 def crawl(
