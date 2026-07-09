@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import re
 import time
+import unicodedata
 from functools import lru_cache
 from multiprocessing import Pool, cpu_count
 from pathlib import Path
@@ -16,6 +17,7 @@ TOKEN_PATTERN = re.compile(r"[^\W_]+", re.UNICODE)
 TUEBINGEN_UMLAUT_RE = re.compile(r"tübingen", re.IGNORECASE)
 TUEBINGEN_ASCII_RE = re.compile(r"\btuebingen\b", re.IGNORECASE)
 TUEBINGEN_UBINGEN_RE = re.compile(r"\btubingen\b", re.IGNORECASE)
+TUEBINGEN_MOJIBAKE_RE = re.compile(r"\bt(?:\u00fc|\u00c3\u00bc|\u00e3\u00bc|\u00e3\u0153|\u0103\u017a)bingen\b", re.IGNORECASE)
 
 SUMMARY_OUTPUT_PATH = Path(__file__).resolve().parent.parent / "data" / "preprocessor_summary.json"
 
@@ -84,12 +86,19 @@ def normalize_tuebingen(text: str) -> str:
     text = TUEBINGEN_UMLAUT_RE.sub("tubingen", text)
     text = TUEBINGEN_ASCII_RE.sub("tubingen", text)
     text = TUEBINGEN_UBINGEN_RE.sub("tubingen", text)
+    text = TUEBINGEN_MOJIBAKE_RE.sub("tubingen", text)
     return text
+
+
+def normalize_unicode_accents(text: str) -> str:
+    """Convert accented Latin characters to plain-letter forms."""
+    normalized = unicodedata.normalize("NFKD", text)
+    return "".join(char for char in normalized if not unicodedata.combining(char))
 
 
 def preprocess(text: str, use_stemming: bool = True) -> list[str]:
     # Lowercase, normalize, tokenize, strip stopwords/short tokens, and optionally stem the text.
-    text = normalize_tuebingen(text or "").lower()
+    text = normalize_unicode_accents(normalize_tuebingen(text or "")).lower()
     tokens = TOKEN_PATTERN.findall(text)
 
     # Hoisted out of the loop: this condition is constant for the whole call.
@@ -118,9 +127,11 @@ def _process_page(page: dict) -> dict:
     return {
         "doc_id": page.get("doc_id"),
         "url": page.get("url", ""),
+        "canonical_url": page.get("canonical_url", ""),
         "title": page.get("title", ""),
         "title_tokens": title_tokens,
         "heading_tokens": heading_tokens,
+        "body_tokens": body_tokens,
         "body_tokens_preview": body_tokens[:80],
         "body_length": len(body_tokens),
         "snippet": short_snippet(page.get("body", "")),
