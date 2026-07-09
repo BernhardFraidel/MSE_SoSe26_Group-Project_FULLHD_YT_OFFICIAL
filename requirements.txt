@@ -1,5 +1,5 @@
-requests
-beautifulsoup4
-langdetect
-nltk
-streamlit
+beautifulsoup4>=4.12
+langdetect>=1.0.9
+nltk>=3.8
+requests>=2.31
+streamlit>=1.35
