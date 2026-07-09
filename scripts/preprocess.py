@@ -1,43 +1,30 @@
 from __future__ import annotations
 
-import argparse
 import sys
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parents[1]
-if str(ROOT) not in sys.path:
-    sys.path.insert(0, str(ROOT))
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(PROJECT_ROOT))
 
-from src.preprocessing import preprocess_raw_pages
+from src.preprocessing import create_preprocessed_pages, preprocess
+from src.utils import read_json
+
+RAW_PAGES_PATH = PROJECT_ROOT / "data" / "raw_pages.json"
+OUTPUT_PATH = PROJECT_ROOT / "data" / "preprocessed_pages.json"
 
 
 def main() -> None:
-    """Run preprocessing from the command line."""
-    parser = argparse.ArgumentParser(description="Preprocess crawled Tuebingen web pages.")
-    parser.add_argument("--input", default="data/raw_pages.json", help="Path to raw pages JSON.")
-    parser.add_argument("--output", default="data/preprocessed_pages.json", help="Path for preprocessed documents JSON.")
-    parser.add_argument(
-        "--summary-output",
-        default="data/preprocessing_summary.json",
-        help="Path for preprocessing summary JSON.",
-    )
-    parser.add_argument("--no-stemming", action="store_true", help="Disable Porter stemming.")
-    args = parser.parse_args()
+    # Mke sure the raw data file exists
+    if not RAW_PAGES_PATH.exists():
+        raise FileNotFoundError(f"Could not find raw pages file at: {RAW_PAGES_PATH}")
 
-    result = preprocess_raw_pages(
-        input_path=args.input,
-        output_path=args.output,
-        summary_output_path=args.summary_output,
-        use_stemming=not args.no_stemming,
-    )
-    summary = result["summary"]
+    raw = read_json(RAW_PAGES_PATH, {"pages": []})
+    pages = raw.get("pages", [])
+    print(f"Loaded {len(pages)} raw page(s) from {RAW_PAGES_PATH}")
 
-    print("[preprocess] done")
-    print(f"  documents: {summary['num_documents']}")
-    print(f"  average body length: {summary['average_body_length']:.2f}")
-    print(f"  vocabulary size: {summary['vocabulary_size']}")
-    print(f"  output: {summary['output_path']}")
-    print(f"  summary output: {summary['summary_output_path']}")
+    # Run the full preprocessing pipeline and write results out.
+    result = create_preprocessed_pages(RAW_PAGES_PATH, OUTPUT_PATH)
+    print(f"\nWrote {len(result['documents'])} preprocessed document(s) to {OUTPUT_PATH}")
 
 
 if __name__ == "__main__":
