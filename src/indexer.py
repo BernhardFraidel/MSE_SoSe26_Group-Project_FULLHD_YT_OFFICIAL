@@ -176,3 +176,42 @@ def build_index_summary(
         "average_document_length": round(average_document_length, 4),
         "documents_with_outgoing_links": documents_with_outgoing_links,
     }
+
+
+def build_index(
+    input_path: str = "data/preprocessed_pages.json",
+    output_path: str = "data/index.json",
+    summary_output_path: str = "data/index_summary.json",
+) -> dict:
+    """Build the complete search index and write index and summary JSON files."""
+    documents = load_preprocessed_documents(input_path)
+    document_metadata = build_document_metadata(documents)
+    inverted_index, document_frequencies = build_inverted_index(documents)
+    field_lengths = build_field_lengths(documents)
+    average_document_length = compute_average_document_length(documents)
+    link_graph = build_link_graph(documents)
+    summary = build_index_summary(documents, inverted_index, average_document_length, link_graph)
+
+    index = {
+        "documents": document_metadata,
+        "inverted_index": inverted_index,
+        "document_frequencies": document_frequencies,
+        "field_lengths": field_lengths,
+        "average_document_length": average_document_length,
+        "link_graph": link_graph,
+    }
+
+    index_output_path = Path(output_path)
+    index_output_path.parent.mkdir(parents=True, exist_ok=True)
+    with index_output_path.open("w", encoding="utf-8") as file:
+        json.dump(index, file, indent=2, ensure_ascii=False)
+
+    summary_path = Path(summary_output_path)
+    summary_path.parent.mkdir(parents=True, exist_ok=True)
+    with summary_path.open("w", encoding="utf-8") as file:
+        json.dump(summary, file, indent=2, ensure_ascii=False)
+
+    return {
+        "index": index,
+        "summary": summary,
+    }
