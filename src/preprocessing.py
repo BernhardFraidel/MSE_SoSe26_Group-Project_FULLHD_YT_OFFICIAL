@@ -127,6 +127,7 @@ def _process_page(page: dict) -> dict:
     return {
         "doc_id": page.get("doc_id"),
         "url": page.get("url", ""),
+        "fetched_url": page.get("fetched_url", ""),
         "canonical_url": page.get("canonical_url", ""),
         "title": page.get("title", ""),
         "title_tokens": title_tokens,
@@ -134,6 +135,8 @@ def _process_page(page: dict) -> dict:
         "body_tokens": body_tokens,
         "body_tokens_preview": body_tokens[:80],
         "body_length": len(body_tokens),
+        "outgoing_links": page.get("outgoing_links", []),
+        "crawl_time": page.get("crawl_time", ""),
         "snippet": short_snippet(page.get("body", "")),
     }
 
