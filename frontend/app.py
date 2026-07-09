@@ -151,7 +151,7 @@ def add_css() -> None:
             min-height: 2.15rem;
         }
         div[data-testid="stVerticalBlock"]:has(> div[data-testid="stElementContainer"] .result-card-marker) div[data-testid="stButton"] button::before {
-            content: "✦";
+            content: "\\2726";
             margin-right: .35rem;
             color: #fbbf24;
         }
@@ -249,7 +249,42 @@ def load_index(index_mtime: float) -> dict:
 @st.cache_data(show_spinner=False)
 def cached_retrieve(query: str, top_k: int, index_mtime: float) -> list[dict]:
     _ = index_mtime
-    return retrieve(query, top_k=top_k)
+    index = read_json(project_path("data", "index.json"), {})
+    response = retrieve(query, index, top_k=top_k)
+    return normalize_results(response)
+
+
+def normalize_results(response: object) -> list[dict]:
+    """Adapt the team's BM25 output to the UI result-card format."""
+    if isinstance(response, list):
+        candidates = response
+    elif isinstance(response, dict):
+        candidates = response.get("results") or response.get("candidates") or []
+    else:
+        candidates = []
+
+    raw_scores = [float(item.get("score", item.get("bm25_score", 0.0)) or 0.0) for item in candidates]
+    max_score = max(raw_scores, default=0.0)
+
+    results: list[dict] = []
+    for rank, item in enumerate(candidates, start=1):
+        score = float(item.get("score", item.get("bm25_score", 0.0)) or 0.0)
+        score_details = dict(item.get("score_details", {}))
+        score_details.setdefault("normalized_bm25", score / max_score if max_score > 0 else 0.0)
+        score_details.setdefault("normalized_field_boost", 0.0)
+        score_details.setdefault("normalized_prf", 0.0)
+        score_details.setdefault("normalized_link", 0.0)
+        score_details.setdefault("normalized_lsa", 0.0)
+
+        result = dict(item)
+        result["rank"] = int(item.get("rank", rank) or rank)
+        result["score"] = score
+        result["score_details"] = score_details
+        result["matched_terms"] = list(dict.fromkeys(item.get("matched_terms", [])))
+        result.setdefault("expansion_terms", [])
+        results.append(result)
+
+    return results
 
 
 @st.cache_data(show_spinner=False)
