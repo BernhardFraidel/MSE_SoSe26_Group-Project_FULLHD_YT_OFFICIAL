@@ -1,0 +1,9 @@
+{
+  "step": "indexing",
+  "num_docs": 151,
+  "vocabulary_size": 20753,
+  "average_document_length": 977.7152,
+  "documents_with_outgoing_links": 149,
+  "index_file_size_mb": 7.53,
+  "elapsed_seconds": 0.7366
+}
