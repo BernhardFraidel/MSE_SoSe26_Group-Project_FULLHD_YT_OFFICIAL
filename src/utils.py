@@ -4,6 +4,8 @@ import json
 from datetime import datetime, timezone
 from pathlib import Path
 from urllib.parse import urljoin, urlparse, urlunparse
+import tempfile
+import os
 
 # File extensions that are almost never HTML pages, used to skip obvious binary/asset links
 NON_HTML_EXTENSIONS = (
@@ -97,9 +99,21 @@ def read_json(path: str | Path, default: object) -> object:
         return default
 
 
-def write_json(path: str | Path, data: object) -> None:
-    """Write data as pretty-printed JSON to disk, creating parent directories as needed."""
+def write_json(path: str | Path, data: Any) -> None:
+    """Write JSON to `path` atomically: write to a temp file in the same directory, flush it to disk, then rename over the target. This means a
+    kill/crash/Ctrl-C mid-write can never leave a truncated or corrupt file."""
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("w", encoding="utf-8") as f:
-        json.dump(data, f, ensure_ascii=False, indent=2)
+
+    fd, tmp_name = tempfile.mkstemp(
+        dir=path.parent, prefix=f".{path.name}.", suffix=".tmp"
+    )
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
+            f.flush()
+            os.fsync(f.fileno())  # make sure bytes are actually on disk, not just in the OS buffer
+        os.replace(tmp_name, path)
+    except BaseException:
+        Path(tmp_name).unlink(missing_ok=True)
+        raise

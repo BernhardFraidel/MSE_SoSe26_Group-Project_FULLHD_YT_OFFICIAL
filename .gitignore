@@ -4,6 +4,7 @@
 # Ignore our data json
 data/*.json
 data/*.jsonl
+data/*.tmp
 
 
 # Byte-compiled / optimized / DLL files
