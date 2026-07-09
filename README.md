@@ -176,8 +176,10 @@ Example JSON:
     {
       "doc_id": 0,
       "url": "https://uni-tuebingen.de/en/",
+      "fetched_url": "https://uni-tuebingen.de/en/",
       "canonical_url": "https://uni-tuebingen.de/en",
       "title": "Home | University of Tuebingen",
+      "snippet": "Example snippet...",
       "title_tokens": ["home", "univers", "tubingen"],
       "heading_tokens": ["univers", "tubingen"],
       "body_tokens": ["student", "research", "campus"],
@@ -205,6 +207,7 @@ Example JSON for `data/index.json`:
     {
       "doc_id": 0,
       "url": "https://uni-tuebingen.de/en/",
+      "canonical_url": "https://uni-tuebingen.de/en",
       "title": "Home | University of Tuebingen",
       "snippet": "Example snippet...",
       "doc_length": 320,
