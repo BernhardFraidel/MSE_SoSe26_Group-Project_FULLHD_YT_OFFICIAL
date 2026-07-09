@@ -1,4 +1,5 @@
 import json
+import time
 from collections import Counter
 from pathlib import Path
 
@@ -184,6 +185,8 @@ def build_index(
     summary_output_path: str = "data/index_summary.json",
 ) -> dict:
     """Build the complete search index and write index and summary JSON files."""
+    start_time = time.perf_counter()
+
     documents = load_preprocessed_documents(input_path)
     document_metadata = build_document_metadata(documents)
     inverted_index, document_frequencies = build_inverted_index(documents)
@@ -200,6 +203,7 @@ def build_index(
         "average_document_length": average_document_length,
         "link_graph": link_graph,
     }
+    summary["elapsed_seconds"] = round(time.perf_counter() - start_time, 4)
 
     index_output_path = Path(output_path)
     index_output_path.parent.mkdir(parents=True, exist_ok=True)
