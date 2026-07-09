@@ -1,393 +1,184 @@
 from __future__ import annotations
 
-import json
 import re
-from datetime import datetime, timezone
+import time
+from functools import lru_cache
+from multiprocessing import Pool, cpu_count
 from pathlib import Path
+from typing import Iterable
 
-try:
-    from nltk.corpus import stopwords as nltk_stopwords
-    from nltk.stem import PorterStemmer
-    from nltk.tokenize import wordpunct_tokenize
-except ImportError:
-    nltk_stopwords = None
-    PorterStemmer = None
-    wordpunct_tokenize = None
+from src.utils import read_json, short_snippet, write_json
 
+# Unicode-aware tokenizer: matches runs of letters/digits from any script (ä, ö, ü, ß)
+TOKEN_PATTERN = re.compile(r"[^\W_]+", re.UNICODE)
 
-FALLBACK_STOPWORDS = {
-    "a",
-    "about",
-    "above",
-    "after",
-    "again",
-    "against",
-    "all",
-    "am",
-    "an",
-    "and",
-    "any",
-    "are",
-    "as",
-    "at",
-    "be",
-    "because",
-    "been",
-    "before",
-    "being",
-    "below",
-    "between",
-    "both",
-    "but",
-    "by",
-    "can",
-    "did",
-    "do",
-    "does",
-    "doing",
-    "down",
-    "during",
-    "each",
-    "few",
-    "for",
-    "from",
-    "further",
-    "had",
-    "has",
-    "have",
-    "having",
-    "he",
-    "her",
-    "here",
-    "hers",
-    "herself",
-    "him",
-    "himself",
-    "his",
-    "how",
-    "i",
-    "if",
-    "in",
-    "into",
-    "is",
-    "it",
-    "its",
-    "itself",
-    "just",
-    "me",
-    "more",
-    "most",
-    "my",
-    "myself",
-    "no",
-    "nor",
-    "not",
-    "now",
-    "of",
-    "off",
-    "on",
-    "once",
-    "only",
-    "or",
-    "other",
-    "our",
-    "ours",
-    "ourselves",
-    "out",
-    "over",
-    "own",
-    "same",
-    "she",
-    "should",
-    "so",
-    "some",
-    "such",
-    "than",
-    "that",
-    "the",
-    "their",
-    "theirs",
-    "them",
-    "themselves",
-    "then",
-    "there",
-    "these",
-    "they",
-    "this",
-    "those",
-    "through",
-    "to",
-    "too",
-    "under",
-    "until",
-    "up",
-    "very",
-    "was",
-    "we",
-    "were",
-    "what",
-    "when",
-    "where",
-    "which",
-    "while",
-    "who",
-    "whom",
-    "why",
-    "will",
-    "with",
-    "you",
-    "your",
-    "yours",
-    "yourself",
-    "yourselves",
+# Precompiled patterns for Tübingen spelling normalization
+TUEBINGEN_UMLAUT_RE = re.compile(r"tübingen", re.IGNORECASE)
+TUEBINGEN_ASCII_RE = re.compile(r"\btuebingen\b", re.IGNORECASE)
+TUEBINGEN_UBINGEN_RE = re.compile(r"\btubingen\b", re.IGNORECASE)
+
+SUMMARY_OUTPUT_PATH = Path(__file__).resolve().parent.parent / "data" / "preprocessor_summary.json"
+
+# Below this many pages we just run sequentially.
+MP_PAGE_THRESHOLD = 100
+
+ENGLISH_STOPWORDS = {
+    "a", "an", "and", "are", "as", "at", "be", "been", "being", "by",
+    "can", "cannot", "could", "did", "do", "does", "doing", "down", "during", "each",
+    "few", "for", "from", "further", "had", "has", "have", "having", "he", "her",
+    "here", "hers", "herself", "him", "himself", "his", "how", "i", "if", "in",
+    "into", "is", "it", "its", "itself", "just", "me", "more", "most", "my",
+    "myself", "no", "nor", "not", "of", "off", "on", "once", "only", "or",
+    "other", "our", "ours", "ourselves", "out", "over", "own", "same", "she", "should",
+    "so", "some", "such", "than", "that", "the", "their", "theirs", "them", "themselves",
+    "then", "there", "these", "they", "this", "those", "through", "to", "too", "under",
+    "until", "up", "very", "was", "we", "were", "what", "when", "where", "which",
+    "while", "who", "whom", "why", "will", "with", "you", "your", "yours", "yourself",
 }
 
-GERMAN_CHARACTER_REPLACEMENTS = {
-    "\u00e4": "ae",
-    "\u00c4": "ae",
-    "\u00f6": "oe",
-    "\u00d6": "oe",
-    "\u00fc": "ue",
-    "\u00dc": "ue",
-    "\u00df": "ss",
+GERMAN_STOPWORDS = {
+    "aber", "alle", "als", "also", "am", "an", "auch", "auf", "aus", "bei",
+    "bin", "bis", "bist", "da", "damit", "dann", "das", "dass", "dein", "deine",
+    "dem", "den", "der", "des", "dich", "die", "dies", "diese", "dieser", "dieses",
+    "doch", "dort", "du", "durch", "ein", "eine", "einen", "einer", "eines", "er",
+    "es", "euch", "eure", "für", "hatte", "hatten", "hier", "ich", "ihm", "ihn",
 }
 
-MOJIBAKE_REPLACEMENTS = {
-    "\u00c3\u00a4": "ae",
-    "\u00e3\u00a4": "ae",
-    "\u00c3\u201e": "ae",
-    "\u00e3\u201e": "ae",
-    "\u00c3\u00b6": "oe",
-    "\u00e3\u00b6": "oe",
-    "\u00c3\u2013": "oe",
-    "\u00e3\u2013": "oe",
-    "\u00c3\u00bc": "ue",
-    "\u00e3\u00bc": "ue",
-    "\u00c3\u0153": "ue",
-    "\u00e3\u0153": "ue",
-    "\u00c3\u0178": "ss",
-    "\u00e3\u0178": "ss",
-    "\u00c3\u0192\u00c2\u00a4": "ae",
-    "\u00e3\u0192\u00c2\u00a4": "ae",
-    "\u00c3\u0192\u00c5\u201e": "ae",
-    "\u00e3\u0192\u00c5\u201e": "ae",
-    "\u00c3\u0192\u00c2\u00b6": "oe",
-    "\u00e3\u0192\u00c2\u00b6": "oe",
-    "\u00c3\u0192\u00c5\u2013": "oe",
-    "\u00e3\u0192\u00c5\u2013": "oe",
-    "\u00c3\u0192\u00c2\u00bc": "ue",
-    "\u00e3\u0192\u00c2\u00bc": "ue",
-    "\u00c3\u0192\u00c5\u201c": "ue",
-    "\u00e3\u0192\u00c5\u201c": "ue",
-}
-
-TUEBINGEN_PATTERN = re.compile(r"\bt(?:ue|u)bingen\b", flags=re.IGNORECASE)
-STOPWORDS_CACHE: tuple[set[str], str] | None = None
-PORTER_STEMMER = PorterStemmer() if PorterStemmer is not None else None
+FALLBACK_STOPWORDS = ENGLISH_STOPWORDS | GERMAN_STOPWORDS
 
 
-def normalize_text_variants(text: str) -> str:
-    """Normalize Tuebingen spellings, encoding artifacts, and German characters."""
-    if not text:
-        return ""
+def _load_stopwords() -> set[str]:
+    # Try to load NLTK's English stopword list, falling back to a hardcoded set if unavailable.
+    try:
+        from nltk.corpus import stopwords
 
-    normalized = str(text)
-
-    for old, new in MOJIBAKE_REPLACEMENTS.items():
-        normalized = normalized.replace(old, new)
-
-    for old, new in GERMAN_CHARACTER_REPLACEMENTS.items():
-        normalized = normalized.replace(old, new)
-
-    return TUEBINGEN_PATTERN.sub("tubingen", normalized)
+        return set(stopwords.words("english")) | FALLBACK_STOPWORDS
+    except Exception as exc:
+        print(f"NLTK stopwords unavailable ({exc!r}); using small hardcoded list of {len(FALLBACK_STOPWORDS)} words")
+        return FALLBACK_STOPWORDS
 
 
-def get_english_stopwords() -> tuple[set[str], str]:
-    """Return English stopwords from NLTK, or a small fallback set if loading fails."""
-    global STOPWORDS_CACHE
+def _load_stemmer():
+    # Try to load NLTK's Porter stemmer, returning None if it can't be loaded.
+    try:
+        from nltk.stem import PorterStemmer
 
-    if STOPWORDS_CACHE is not None:
-        return STOPWORDS_CACHE
-
-    if nltk_stopwords is not None:
-        try:
-            STOPWORDS_CACHE = (set(nltk_stopwords.words("english")), "nltk")
-            return STOPWORDS_CACHE
-        except Exception:
-            pass
-
-    STOPWORDS_CACHE = (set(FALLBACK_STOPWORDS), "fallback")
-    return STOPWORDS_CACHE
+        return PorterStemmer()
+    except Exception as exc:
+        print(f"NLTK PorterStemmer unavailable ({exc!r}); stemming will be skipped")
+        return None
 
 
-def _tokenize(text: str) -> list[str]:
-    """Tokenize text with NLTK wordpunct_tokenize, using a simple fallback if NLTK is missing."""
-    if wordpunct_tokenize is not None:
-        return wordpunct_tokenize(text)
-    return re.findall(r"\w+|[^\w\s]", text)
+STOPWORDS = _load_stopwords()
+STEMMER = _load_stemmer()
+
+
+@lru_cache(maxsize=5000)
+def _stem_cached(token: str) -> str:
+    # Cache stemming results (bounded at 5000 entries) since the same tokens recur constantly across pages.
+    return STEMMER.stem(token)
+
+
+def normalize_tuebingen(text: str) -> str:
+    # Fold all spelling variants of "Tübingen"/"Tuebingen" to one ASCII form to ease search later.
+    text = TUEBINGEN_UMLAUT_RE.sub("tubingen", text)
+    text = TUEBINGEN_ASCII_RE.sub("tubingen", text)
+    text = TUEBINGEN_UBINGEN_RE.sub("tubingen", text)
+    return text
 
 
 def preprocess(text: str, use_stemming: bool = True) -> list[str]:
-    """Normalize, tokenize, remove stopwords, and optionally stem a text string."""
-    if not text:
-        return []
+    # Lowercase, normalize, tokenize, strip stopwords/short tokens, and optionally stem the text.
+    text = normalize_tuebingen(text or "").lower()
+    tokens = TOKEN_PATTERN.findall(text)
 
-    normalized = normalize_text_variants(str(text).lower())
-    stopword_set, _ = get_english_stopwords()
+    # Hoisted out of the loop: this condition is constant for the whole call.
+    should_stem = use_stemming and STEMMER is not None
 
-    tokens = [
-        token
-        for token in _tokenize(normalized)
-        if token.isalnum() and token not in stopword_set
-    ]
-
-    if use_stemming and PORTER_STEMMER is None:
-        raise RuntimeError("NLTK PorterStemmer is required for stemming. Install nltk first.")
-
-    if use_stemming:
-        # extra Check für den Type-Checker
-        assert PORTER_STEMMER is not None
-        tokens = [PORTER_STEMMER.stem(token) for token in tokens]
-
-    return tokens
+    cleaned: list[str] = []
+    for token in tokens:
+        if token in STOPWORDS or len(token) <= 1:
+            continue
+        if should_stem and token != "tubingen":
+            token = _stem_cached(token)
+        cleaned.append(token)
+    return cleaned
 
 
-def preprocess_query(query: str, use_stemming: bool = True) -> list[str]:
-    """Preprocess a query with the same function used for document text."""
-    return preprocess(query, use_stemming=use_stemming)
+def tokens_from_list(values: Iterable[str]) -> list[str]:
+    # Join a list of strings into one text blob and preprocess it into tokens.
+    return preprocess(" ".join(values))
 
 
-def preprocess_page(page: dict, use_stemming: bool = True) -> dict:
-    """Preprocess title, headings, and body text while preserving page metadata."""
-    page = page or {}
-    result = {}
-
-    metadata_fields = (
-        "doc_id",
-        "url",
-        "fetched_url",
-        "canonical_url",
-        "title",
-        "language",
-        "is_tuebingen_related",
-        "outgoing_links",
-        "crawl_time",
-    )
-    for field in metadata_fields:
-        if field in page:
-            result[field] = page[field]
-
-    title = page.get("title") or ""
-    headings = page.get("headings") or []
-    body = page.get("body") or ""
-
-    if isinstance(headings, list):
-        headings_text = " ".join(str(heading) for heading in headings if heading)
-    else:
-        headings_text = str(headings)
-
-    title_tokens = preprocess(str(title), use_stemming=use_stemming)
-    heading_tokens = preprocess(headings_text, use_stemming=use_stemming)
-    body_tokens = preprocess(str(body), use_stemming=use_stemming)
-
-    result["title_tokens"] = title_tokens
-    result["heading_tokens"] = heading_tokens
-    result["body_tokens"] = body_tokens
-    result["body_tokens_preview"] = body_tokens[:30]
-    result["body_length"] = len(body_tokens)
-
-    return result
-
-
-def load_raw_pages(path: str) -> list[dict]:
-    """Load raw pages from a JSON file using either {'pages': [...]} or a plain list format."""
-    with Path(path).open("r", encoding="utf-8") as file:
-        data = json.load(file)
-
-    if isinstance(data, dict) and isinstance(data.get("pages"), list):
-        pages = data["pages"]
-    elif isinstance(data, list):
-        pages = data
-    else:
-        raise ValueError(
-            f"Unsupported raw pages structure in {path}. Expected {{'pages': [...]}} or [...]."
-        )
-
-    for index, page in enumerate(pages):
-        if not isinstance(page, dict):
-            raise ValueError(
-                f"Unsupported page entry at position {index} in {path}. Expected a JSON object."
-            )
-
-    return pages
-
-
-def build_preprocessing_summary(
-    documents: list[dict],
-    input_path: str,
-    output_path: str,
-    summary_output_path: str,
-    use_stemming: bool,
-    stopword_source: str,
-) -> dict:
-    """Build compact statistics for a preprocessing run."""
-    body_lengths = [int(document.get("body_length", 0)) for document in documents]
-    vocabulary = set()
-    for document in documents:
-        vocabulary.update(document.get("title_tokens", []))
-        vocabulary.update(document.get("heading_tokens", []))
-        vocabulary.update(document.get("body_tokens", []))
-
-    num_documents = len(documents)
-    average_body_length = sum(body_lengths) / num_documents if num_documents else 0.0
-
+def _process_page(page: dict) -> dict:
+    # Preprocess a single page's text fields.
+    title_tokens = preprocess(page.get("title", ""))
+    heading_tokens = tokens_from_list(page.get("headings", []))
+    body_tokens = preprocess(page.get("body", ""))
     return {
-        "step": "preprocessing",
-        "input_path": input_path,
-        "output_path": output_path,
-        "summary_output_path": summary_output_path,
-        "use_stemming": use_stemming,
-        "stopword_source": stopword_source,
-        "normalization": "tubingen_aliases+german_umlauts",
-        "num_documents": num_documents,
-        "average_body_length": average_body_length,
-        "min_body_length": min(body_lengths) if body_lengths else 0,
-        "max_body_length": max(body_lengths) if body_lengths else 0,
-        "empty_body_documents": sum(1 for length in body_lengths if length == 0),
-        "vocabulary_size": len(vocabulary),
-        "created_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "doc_id": page.get("doc_id"),
+        "url": page.get("url", ""),
+        "title": page.get("title", ""),
+        "title_tokens": title_tokens,
+        "heading_tokens": heading_tokens,
+        "body_tokens_preview": body_tokens[:80],
+        "body_length": len(body_tokens),
+        "snippet": short_snippet(page.get("body", "")),
     }
 
 
-def preprocess_raw_pages(
-    input_path: str = "data/raw_pages.json",
-    output_path: str = "data/preprocessed_pages.json",
-    summary_output_path: str = "data/preprocessing_summary.json",
-    use_stemming: bool = True,
+def create_preprocessed_pages(
+    raw_pages_path: str | Path,
+    output_path: str | Path,
+    use_multiprocessing: bool = True,
+    processes: int | None = None,
 ) -> dict:
-    """Preprocess all raw pages and write document tokens plus a separate summary file."""
-    pages = load_raw_pages(input_path)
-    documents = [preprocess_page(page, use_stemming=use_stemming) for page in pages]
-    _, stopword_source = get_english_stopwords()
+    # Load raw page data, preprocess each pages text fields, and write the results to JSON.
+    # Pages are independent of one another, so for large inputs the per-page work is farmed
+    # out to a process pool; small inputs run sequentially to avoid pool startup overhead.
+    start_time = time.perf_counter()
 
-    summary = build_preprocessing_summary(
-        documents=documents,
-        input_path=input_path,
-        output_path=output_path,
-        summary_output_path=summary_output_path,
-        use_stemming=use_stemming,
-        stopword_source=stopword_source,
-    )
+    raw = read_json(raw_pages_path, {"pages": []})
+    pages = raw.get("pages", [])
 
-    output_file = Path(output_path)
-    summary_file = Path(summary_output_path)
-    output_file.parent.mkdir(parents=True, exist_ok=True)
-    summary_file.parent.mkdir(parents=True, exist_ok=True)
+    parallel = use_multiprocessing and len(pages) >= MP_PAGE_THRESHOLD
+    if parallel:
+        num_workers = max(1, min(processes or cpu_count(), len(pages)))
+        with Pool(processes=num_workers) as pool:
+            documents = pool.map(_process_page, pages)
+    else:
+        num_workers = 1
+        documents = [_process_page(page) for page in pages]
 
-    with output_file.open("w", encoding="utf-8") as file:
-        json.dump({"documents": documents}, file, ensure_ascii=False, indent=2)
+    total_body_tokens = sum(doc["body_length"] for doc in documents)
 
-    with summary_file.open("w", encoding="utf-8") as file:
-        json.dump(summary, file, ensure_ascii=False, indent=2)
+    output = {"documents": documents}
+    write_json(output_path, output)
 
-    return {"documents": documents, "summary": summary}
+    elapsed_seconds = time.perf_counter() - start_time
+    mode = f"multiprocessing ({num_workers} workers)" if parallel else "sequential"
+    print(f"preprocess: processed {len(documents)} pages in {elapsed_seconds:.3f}s [{mode}]")
+
+    summary = {
+        "num_pages": len(documents),
+        "total_body_tokens": total_body_tokens,
+        "elapsed_seconds": elapsed_seconds,
+        "mode": mode,
+        "num_workers": num_workers,
+    }
+    if parallel:
+        # Each worker process has its own lru_cache, so hit/miss counts cant be meaningfully aggregated across processes.
+        summary["stemming_cache"] = {"maxsize": _stem_cached.cache_info().maxsize, "note": "per-worker caches, not aggregated"}
+    else:
+        cache_info = _stem_cached.cache_info()
+        summary["stemming_cache"] = {
+            "hits": cache_info.hits,
+            "misses": cache_info.misses,
+            "maxsize": cache_info.maxsize,
+            "currsize": cache_info.currsize,
+        }
+
+    SUMMARY_OUTPUT_PATH.parent.mkdir(parents=True, exist_ok=True)
+    write_json(SUMMARY_OUTPUT_PATH, summary)
+
+    return output

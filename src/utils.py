@@ -13,6 +13,17 @@ NON_HTML_EXTENSIONS = (
     ".css", ".js", ".json", ".xml", ".rss", ".woff", ".woff2", ".ttf", ".eot"
 )
 
+# A short list of common two-part public suffixes. Not exhaustive (a real public-suffix
+# list has thousands of entries), but enough to stop us from collapsing e.g. "co.uk"
+# itself into a fake "registrable domain" of "uk".
+TWO_PART_SUFFIXES = {
+    "co.uk", "org.uk", "ac.uk", "gov.uk", "net.uk",
+    "co.jp", "ne.jp", "or.jp",
+    "com.au", "net.au", "org.au",
+    "co.nz", "co.za", "co.in", "co.at", "or.at",
+    "com.br", "com.mx", "com.tr", "com.cn",
+}
+
 # Project root, one level up from this file (src/utils.py -> project root)
 ROOT = Path(__file__).resolve().parent.parent
 
@@ -39,6 +50,20 @@ def normalize_url(url: str, base: str | None = None) -> str:
     path = parsed.path or "/"
     # Drop the fragment (#...) since it never changes what the server returns
     return urlunparse((scheme, netloc, path, parsed.params, parsed.query, ""))
+
+
+def get_domain(url: str) -> str:
+    """Return the "registrable domain" for a URL, used as the key for per-domain politeness. Subdomains collapse onto the same key so that, e.g., "en.wikipedia.org" and "de.wikipedia.org" share a single polite-delay timer"""
+    host = urlparse(url).netloc.lower().split(":")[0]
+    if not host:
+        return host
+    parts = host.split(".")
+    if len(parts) <= 2:
+        return host
+    last_two = ".".join(parts[-2:])
+    if last_two in TWO_PART_SUFFIXES and len(parts) >= 3:
+        return ".".join(parts[-3:])
+    return last_two
 
 
 def is_probably_html_url(url: str) -> bool:
