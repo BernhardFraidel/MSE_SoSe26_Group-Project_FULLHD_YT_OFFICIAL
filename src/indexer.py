@@ -121,3 +121,58 @@ def compute_average_document_length(documents: list[dict]) -> float:
         total_length += document.get("body_length", len(body_tokens))
 
     return total_length / len(documents)
+
+
+def build_link_graph(documents: list[dict]) -> dict[str, list[int]]:
+    """Build an internal link graph between indexed documents."""
+    url_to_doc_id: dict[str, int] = {}
+
+    for document in documents:
+        doc_id = document.get("doc_id")
+        if doc_id is None:
+            continue
+
+        url = document.get("url", "")
+        fetched_url = document.get("fetched_url", "")
+        canonical_url = document.get("canonical_url", "")
+        if url:
+            url_to_doc_id[url] = doc_id
+        if fetched_url:
+            url_to_doc_id[fetched_url] = doc_id
+        if canonical_url:
+            url_to_doc_id[canonical_url] = doc_id
+
+    link_graph: dict[str, list[int]] = {}
+    for document in documents:
+        doc_id = document.get("doc_id")
+        if doc_id is None:
+            continue
+
+        linked_doc_ids = set()
+        for outgoing_link in document.get("outgoing_links", []):
+            target_doc_id = url_to_doc_id.get(outgoing_link)
+            if target_doc_id is None or target_doc_id == doc_id:
+                continue
+            linked_doc_ids.add(target_doc_id)
+
+        link_graph[str(doc_id)] = sorted(linked_doc_ids)
+
+    return link_graph
+
+
+def build_index_summary(
+    documents: list[dict],
+    inverted_index: dict[str, list[dict]],
+    average_document_length: float,
+    link_graph: dict[str, list[int]],
+) -> dict:
+    """Build compact statistics for the indexing step."""
+    documents_with_outgoing_links = sum(1 for document in documents if document.get("outgoing_links"))
+
+    return {
+        "step": "indexing",
+        "num_docs": len(documents),
+        "vocabulary_size": len(inverted_index),
+        "average_document_length": round(average_document_length, 4),
+        "documents_with_outgoing_links": documents_with_outgoing_links,
+    }
