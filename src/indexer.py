@@ -85,3 +85,39 @@ def build_inverted_index(documents: list[dict]) -> tuple[dict[str, list[dict]], 
     sorted_document_frequencies = dict(sorted(document_frequencies.items()))
 
     return inverted_index, sorted_document_frequencies
+
+
+def build_field_lengths(documents: list[dict]) -> dict[str, dict[str, int]]:
+    """Build per-field token length mappings keyed by document id."""
+    field_lengths = {
+        "body": {},
+        "title": {},
+        "heading": {},
+    }
+
+    for document in documents:
+        doc_id = document.get("doc_id")
+        if doc_id is None:
+            continue
+
+        body_tokens = document.get("body_tokens", [])
+        doc_id_key = str(doc_id)
+
+        field_lengths["body"][doc_id_key] = document.get("body_length", len(body_tokens))
+        field_lengths["title"][doc_id_key] = len(document.get("title_tokens", []))
+        field_lengths["heading"][doc_id_key] = len(document.get("heading_tokens", []))
+
+    return field_lengths
+
+
+def compute_average_document_length(documents: list[dict]) -> float:
+    """Compute the average body length across all documents."""
+    if not documents:
+        return 0.0
+
+    total_length = 0
+    for document in documents:
+        body_tokens = document.get("body_tokens", [])
+        total_length += document.get("body_length", len(body_tokens))
+
+    return total_length / len(documents)
