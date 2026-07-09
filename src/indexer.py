@@ -203,12 +203,13 @@ def build_index(
         "average_document_length": average_document_length,
         "link_graph": link_graph,
     }
-    summary["elapsed_seconds"] = round(time.perf_counter() - start_time, 4)
 
     index_output_path = Path(output_path)
     index_output_path.parent.mkdir(parents=True, exist_ok=True)
     with index_output_path.open("w", encoding="utf-8") as file:
         json.dump(index, file, indent=2, ensure_ascii=False)
+
+    summary["elapsed_seconds"] = round(time.perf_counter() - start_time, 4)
 
     summary_path = Path(summary_output_path)
     summary_path.parent.mkdir(parents=True, exist_ok=True)
