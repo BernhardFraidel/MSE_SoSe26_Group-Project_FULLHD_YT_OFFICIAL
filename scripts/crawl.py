@@ -45,6 +45,13 @@ def main() -> None:
         help="Write frontier/visited/pages to disk every N attempted fetches, so an interrupted run (Ctrl-C) can be resumed later instead of restarting.",
     )
     parser.add_argument(
+        "--log-file",
+        dest="log_file",
+        type=str,
+        default=None,
+        help="Path to write crawl logs to (default: crawl.log in the project root). Every log line is also printed to the console.",
+    )
+    parser.add_argument(
         "--fresh",
         action="store_true",
         help=(
@@ -53,6 +60,9 @@ def main() -> None:
         ),
     )
     args = parser.parse_args()
+    kwargs = {}
+    if args.log_file is not None:
+        kwargs["log_path"] = args.log_file
     summary = crawl(
         max_pages=args.max_pages,
         timeout=args.timeout,
@@ -60,6 +70,7 @@ def main() -> None:
         checkpoint_every=args.checkpoint_every,
         workers=args.workers,
         fresh=args.fresh,
+        **kwargs,
     )
     print(summary)
 

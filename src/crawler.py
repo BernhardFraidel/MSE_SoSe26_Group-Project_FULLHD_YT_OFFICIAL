@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import threading
 import time
 import urllib.robotparser
@@ -26,12 +27,41 @@ from src.utils import (
 
 USER_AGENT = "MSE-Tuebingen-StudentCrawler | Contact: janis.weller@student.uni-tuebingen.de"
 
+logger = logging.getLogger("crawler")
+logger.setLevel(logging.INFO)
+
+
+def _setup_logging(log_path: str | Path) -> None:
+    """Point the crawler's logger at log_path (appending) as well as the console.
+
+    Safe to call multiple times (e.g. repeated crawl() calls in one process):
+    clears any handlers this function previously added so log lines aren't
+    duplicated, then re-attaches fresh ones to the (possibly new) log_path.
+    """
+    log_path = Path(log_path)
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+
+    for handler in list(logger.handlers):
+        logger.removeHandler(handler)
+
+    formatter = logging.Formatter("%(asctime)s %(message)s", datefmt="%Y-%m-%d %H:%M:%S")
+
+    file_handler = logging.FileHandler(log_path, encoding="utf-8")
+    file_handler.setFormatter(formatter)
+    logger.addHandler(file_handler)
+
+    console_handler = logging.StreamHandler()
+    console_handler.setFormatter(logging.Formatter("%(message)s"))
+    logger.addHandler(console_handler)
+
+    logger.propagate = False
+
 
 def load_seed_urls(seeds_path: str | Path = project_path("seeds.json")) -> list[str]:
     """Read the flat list of seed URLs from seeds.json and normalize them (no priority or title fields)."""
     data = read_json(seeds_path, {"seeds": []})
     seeds = data.get("seeds", [])
-    print(f"loaded {len(seeds)} seed urls from {seeds_path}")
+    logger.info(f"loaded {len(seeds)} seed urls from {seeds_path}")
     return [normalize_url(seed) for seed in seeds if seed]
 
 
@@ -419,7 +449,7 @@ def _process_url(state: CrawlerState, session: requests.Session, worker_id: int,
             state.record_visited(url, status_code or "error")
     finally:
         elapsed_ms = (time.time() - state.start_time) * 1000
-        print(f"worker={worker_id} t+{elapsed_ms:.0f}ms domain={domain} url={url} {reason}")
+        logger.info(f"worker={worker_id} t+{elapsed_ms:.0f}ms domain={domain} url={url} {reason}")
         state.finish_url(domain, url, time.time())
 
 
@@ -435,7 +465,7 @@ def _worker_loop(state: CrawlerState, worker_id: int, timeout: float, checkpoint
             # but an uncaught exception here would silently kill this thread, and a
             # dead worker permanently loses its share of concurrency. Log and retry
             # rather than let the thread disappear.
-            print(f"worker={worker_id} error claiming next url: {type(exc).__name__}: {exc}")
+            logger.info(f"worker={worker_id} error claiming next url: {type(exc).__name__}: {exc}")
             time.sleep(0.05)
             continue
 
@@ -452,7 +482,7 @@ def _worker_loop(state: CrawlerState, worker_id: int, timeout: float, checkpoint
         try:
             _process_url(state, session, worker_id, url, timeout)
         except Exception as exc:
-            print(f"worker={worker_id} unexpected crash processing {url}: {type(exc).__name__}: {exc}")
+            logger.info(f"worker={worker_id} unexpected crash processing {url}: {type(exc).__name__}: {exc}")
 
         try:
             if state.should_checkpoint():
@@ -467,13 +497,13 @@ def _worker_loop(state: CrawlerState, worker_id: int, timeout: float, checkpoint
                     frontier_low,
                     visited_entries,
                 )
-                print(
+                logger.info(
                     f"checkpoint saved (attempted={state.attempted}, saved={state.saved}, "
                     f"frontier_high={len(frontier_high)}, frontier_low={len(frontier_low)})"
                 )
         except Exception as exc:
             # Disk-full, permissions, or a stray non-serializable value shouldn't be able to kill a worker thread.
-            print(f"worker={worker_id} checkpoint save failed: {type(exc).__name__}: {exc}")
+            logger.info(f"worker={worker_id} checkpoint save failed: {type(exc).__name__}: {exc}")
 
 
 def crawl(
@@ -481,6 +511,7 @@ def crawl(
     raw_pages_path: str | Path = project_path("data", "raw_pages.json"),
     frontier_path: str | Path = project_path("data", "frontier.json"),
     visited_path: str | Path = project_path("data", "visited.json"),
+    log_path: str | Path = project_path("crawl.log"),
     max_pages: int = 20,
     timeout: float = 8.0,
     polite_delay: float = 0.6,
@@ -493,6 +524,11 @@ def crawl(
     raw_pages_path = Path(raw_pages_path)
     frontier_path = Path(frontier_path)
     visited_path = Path(visited_path)
+    log_path = Path(log_path)
+    if fresh and log_path.exists():
+        # Keep crawl.log consistent with the other state files that --fresh discards.
+        log_path.unlink()
+    _setup_logging(log_path)
     start_time = time.time()
 
     if fresh:
@@ -501,7 +537,7 @@ def crawl(
         frontier_high = load_seed_urls(seeds_path)
         frontier_low = []
         visited_entries = []
-        print("--fresh: discarding any existing raw_pages.json/frontier.json/visited.json and starting from seeds")
+        logger.info("--fresh: discarding any existing raw_pages.json/frontier.json/visited.json and starting from seeds")
     else:
         # Load any previously saved pages, and resume both frontiers from disk (or from 0).
         # Both queues live in one frontier.json: {"frontier_high": [...], "frontier_low": [...]}.
@@ -528,7 +564,7 @@ def crawl(
         checkpoint_every=checkpoint_every,
     )
 
-    print(
+    logger.info(
         f"starting crawl: {len(frontier_high)} urls in frontier_high, {len(frontier_low)} urls in frontier_low, "
         f"{len(pages)} pages already saved, max_pages={max_pages}, workers={workers}, fresh={fresh}"
     )
@@ -555,13 +591,13 @@ def crawl(
     except KeyboardInterrupt:
         state.interrupted = True
         state.stop_event.set()
-        print("interrupted by user (Ctrl-C) - waiting for in-flight requests to finish, then saving progress so the crawl can be resumed later")
+        logger.info("interrupted by user (Ctrl-C) - waiting for in-flight requests to finish, then saving progress so the crawl can be resumed later")
         join_deadline = timeout + 2
         for t in threads:
             t.join(timeout=join_deadline)
             if t.is_alive():
                 # This worker is stuck past its request timeout
-                print(f"warning: {t.name} did not finish within {join_deadline:.0f}s, abandoning it (it may still be running in the background)")
+                logger.info(f"warning: {t.name} did not finish within {join_deadline:.0f}s, abandoning it (it may still be running in the background)")
 
     pages, frontier_high, frontier_low, visited_entries = state.snapshot_for_checkpoint()
 
@@ -605,7 +641,7 @@ def crawl(
     }
     write_json(summary_path, summary)
     status = "interrupted" if state.interrupted else "done"
-    print(
+    logger.info(
         f"{status}: saved={state.saved} attempted={state.attempted} "
         f"frontier_high_remaining={len(frontier_high)} frontier_low_remaining={len(frontier_low)} "
         f"elapsed={summary['elapsed_human_this_run']}"
