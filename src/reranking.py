@@ -86,11 +86,17 @@ def rerank(retrieval_results, index, title_weight=2.0, heading_weight=1.0, bm25_
         return (value - min_v) / (max_v - min_v)
 
     reranked_candidates = []
+    
+    max_possible_field = title_weight + heading_weight
+    
+    reranked_candidates = []
 
-    # Kombinierten und gewichteten Score berechnen
     for item in temp_candidates:
+        # BM25 relativ normalisieren
         norm_bm25 = normalize(item["raw_bm25"], min_bm25, max_bm25)
-        norm_field = normalize(item["raw_field"], min_field, max_field)
+        
+        # Field Boost absolut normalisieren
+        norm_field = min(1.0, item["raw_field"] / max_possible_field) if max_possible_field > 0 else 0.0
 
         # Lineare Kombination
         final_score = (bm25_importance * norm_bm25) + (field_importance * norm_field)
