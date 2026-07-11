@@ -94,8 +94,8 @@ Example JSON:
 ### 2. Crawling
 
 - Input: `seeds.json`, `data/frontier.json`, `data/visited.json`
-- Processing: fetch HTML pages, respect robots.txt, extract title/body/headings/links, filter English Tuebingen-related pages
-- Output: `data/raw_pages.json`, updated `data/frontier.json`, updated `data/visited.json`, `data/crawl_summary.json`
+- Processing: fetch HTML pages with a domain-aware, polite, multi-threaded frontier (`frontier_high`, i.e. Tuebingen-related discoveries, is always drained before `frontier_low`); respect robots.txt; extract title/body/headings/links; filter English Tuebingen-related pages; retry transient failures (connection errors, timeouts, 429/5xx) a few times before giving up on a URL; checkpoint progress periodically so a run can be safely interrupted with Ctrl-C and resumed later
+- Output: `data/raw_pages.json`, updated `data/frontier.json`, updated `data/visited.json`, `data/crawl_summary.json`, `crawl.log` (one line per fetch attempt, e.g. `worker=2 t+4231ms domain=uni-tuebingen.de url=... saved: doc_id=7 (8/20 pages)`)
 - Files: `src/crawler.py`, `scripts/crawl.py`, `src/utils.py`
 
 Example JSON for `data/raw_pages.json`:
@@ -120,17 +120,28 @@ Example JSON for `data/raw_pages.json`:
 }
 ```
 
-Example JSON for `data/frontier.json`:
+Example JSON for `data/frontier.json`. URLs are grouped by domain (for polite, per-domain rate limiting) and split into two priority levels:  `frontier_high` for links discovered on Tuebingen-related pages, `frontier_low` for everything else. `domain_next_time` records the earliest timestamp each domain may be fetched again:
 
 ```json
-[
-  "https://www.unimuseum.uni-tuebingen.de/de/ausstellungen/sonderausstellungen/agora/die-agora-von-athen",
-  "https://www.unimuseum.uni-tuebingen.de/de/ausstellungen/sonderausstellungen/agora-1",
-  "https://www.unimuseum.uni-tuebingen.de/de/ausstellungen/sonderausstellungen/dirty-science"
-]
+{
+  "frontier_high": {
+    "www.unimuseum.uni-tuebingen.de": [
+      "https://www.unimuseum.uni-tuebingen.de/de/ausstellungen/sonderausstellungen/agora/die-agora-von-athen",
+      "https://www.unimuseum.uni-tuebingen.de/de/ausstellungen/sonderausstellungen/agora-1"
+    ]
+  },
+  "frontier_low": {
+    "www.unimuseum.uni-tuebingen.de": [
+      "https://www.unimuseum.uni-tuebingen.de/de/ausstellungen/sonderausstellungen/dirty-science"
+    ]
+  },
+  "domain_next_time": {
+    "www.unimuseum.uni-tuebingen.de": 1751713200.42
+  }
+}
 ```
 
-Example JSON for `data/visited.json`:
+Example JSON for `data/visited.json`. `status_code` is either the HTTP status, or one of `"robots_blocked"` / `"request_error"` / `"error"` for URLs that were permanently skipped rather than fetched. A URL only appears here once its retries are exhausted:
 
 ```json
 {
@@ -144,17 +155,29 @@ Example JSON for `data/visited.json`:
 }
 ```
 
-Example JSON for `data/crawl_summary.json`:
+Example JSON for `data/crawl_summary.json`. This accumulates across runs (`fresh=True` resets it) - `_this_run` fields describe the run that just finished, `_total` fields are cumulative since the last fresh start:
 
 ```json
 {
   "step": "crawling",
-  "saved_pages": 1,
-  "attempted_urls": 1,
-  "frontier_size": 1,
+  "runs_completed": 1,
+  "total_pages": 1,
+  "attempted_urls_this_run": 1,
+  "attempted_urls_total": 1,
+  "frontier_high_size": 0,
+  "frontier_low_size": 1,
   "visited_size": 1,
-  "request_timeout_seconds": 6,
-  "polite_delay_seconds": 0.6
+  "timeout": 8.0,
+  "polite_delay": 0.6,
+  "workers": 4,
+  "last_run_interrupted": false,
+  "interrupted_runs": 0,
+  "elapsed_seconds_this_run": 3.42,
+  "elapsed_human_this_run": "3s",
+  "elapsed_seconds_total": 3.42,
+  "elapsed_human_total": "3s",
+  "started_fresh_last_run": true,
+  "last_updated": "2026-07-05T12:00:00Z"
 }
 ```
 

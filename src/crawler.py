@@ -29,6 +29,9 @@ from src.utils import (
 
 USER_AGENT = "MSE-Tuebingen-StudentCrawler | Contact: janis.weller@student.uni-tuebingen.de"
 
+# HTTP statuses worth retrying rather than permanently blacklisting the URL
+_TRANSIENT_STATUS_CODES = {429, 500, 502, 503, 504}
+
 logger = logging.getLogger("crawler")
 logger.setLevel(logging.INFO)
 
@@ -47,6 +50,7 @@ def _setup_logging(log_path: str | Path) -> None:
 
     for handler in list(logger.handlers):
         logger.removeHandler(handler)
+        handler.close()
 
     formatter = logging.Formatter("%(asctime)s %(message)s", datefmt="%Y-%m-%d %H:%M:%S")
 
@@ -169,11 +173,16 @@ class CrawlerState:
         checkpoint_every: int,
         domain_next_time: dict[str, float] | None = None,
         elapsed_offset: float = 0.0,
+        max_retries: int = 3,
     ) -> None:
         self.start_time = time.time() - elapsed_offset
         self.lock = threading.Lock()
         # Guards the writing of checkpoint files.
         self.checkpoint_lock = threading.Lock()
+
+        # Per-URL count of transient-failure retries so far.
+        self.retry_counts: dict[str, int] = {}
+        self.max_retries = max_retries
 
         self.frontier_high = _FrontierLevel()
         self.frontier_low = _FrontierLevel()
@@ -298,29 +307,32 @@ class CrawlerState:
         stored_time, _tiebreak, domain = level.heap[0]
         return max(stored_time, self.domain_next_time.get(domain, 0.0))
 
-    def claim_next_url(self) -> tuple[str | None, str]:
+    def claim_next_url(self) -> tuple[str | None, str, str | None]:
         """Try to claim the next URL that is both in a frontier and not on its domain's cooldown. frontier_high (Tuebingen-related discoveries) is always scanned before frontier_low.
-        Returns (url, "ok") if a URL was claimed (this also marks it in-flight and reserves its domains cooldown slot), (None, "wait") if nothing is ready yet
-        but there's still work outstanding, or (None, "done") if the crawl should stop (max_pages reached, or both frontiers are empty with no other worker
-        in-flight that could still add to them).
+        Returns (url, "ok", level) if a URL was claimed (this also marks it in-flight and reserves its domain's cooldown slot) - level is "high" or "low",
+        identifying which frontier it came from.
+        Returns (None, "wait", None) if nothing is ready yet but there's still work outstanding, or (None, "done", None) if the crawl should stop (max_pages reached, or both
+        frontiers are empty with no other worker in-flight that could still add to them).
         """
         with self.lock:
             if self.stop_event.is_set() or len(self.pages) >= self.max_pages:
                 self.stop_event.set()
-                return None, "done"
+                return None, "done", None
 
             now = time.time()
             claimed_url = self._claim_from_heap(self.frontier_high, now)
+            level = "high"
             if claimed_url is None:
                 claimed_url = self._claim_from_heap(self.frontier_low, now)
+                level = "low"
 
             if claimed_url is not None:
-                return claimed_url, "ok"
+                return claimed_url, "ok", level
 
             if not self.frontier_high.domains and not self.frontier_low.domains and self.in_flight == 0:
                 self.stop_event.set()
-                return None, "done"
-            return None, "wait"
+                return None, "done", None
+            return None, "wait", None
 
     def seconds_until_next_domain(self) -> float:
         """How long a worker should sleep before it's worth calling claim_next_url() again."""
@@ -361,6 +373,19 @@ class CrawlerState:
     def record_visited(self, url: str, status_code: Any) -> None:
         with self.lock:
             self.visited_entries.append({"url": url, "visited_at": now_utc_iso(), "status_code": status_code})
+            self.visited_urls.add(url)
+
+    def note_failure(self, url: str, level_name: str | None, transient: bool, status_for_record: Any) -> None:
+        """Handle a failed fetch (connection error, timeout, or a retryable HTTP status like 429/5xx)."""
+        with self.lock:
+            if transient and level_name is not None:
+                attempts = self.retry_counts.get(url, 0) + 1
+                self.retry_counts[url] = attempts
+                if attempts <= self.max_retries:
+                    level = self.frontier_high if level_name == "high" else self.frontier_low
+                    self._enqueue(url, level)
+                    return
+            self.visited_entries.append({"url": url, "visited_at": now_utc_iso(), "status_code": status_for_record})
             self.visited_urls.add(url)
 
     def try_save_page(self, canonical_url: str, page: dict[str, Any]) -> tuple[str, int, int, bool]:
@@ -485,7 +510,7 @@ def _save_state(
     write_json(visited_path, {"visited": visited_entries})
 
 
-def _process_url(state: CrawlerState, session: requests.Session, worker_id: int, url: str, timeout: float) -> None:
+def _process_url(state: CrawlerState, session: requests.Session, worker_id: int, url: str, timeout: float, level_name: str | None) -> None:
     """Fetch, parse, and (maybe) save a single URL. Always releases the URL's in-flight/cooldown slot when done."""
     domain = "unknown"
     status_code: Any = None
@@ -503,6 +528,13 @@ def _process_url(state: CrawlerState, session: requests.Session, worker_id: int,
         status_code = response.status_code
         fetched_url = normalize_url(response.url)
         content_type = response.headers.get("content-type", "")
+
+        if status_code in _TRANSIENT_STATUS_CODES:
+            state.note_failure(url, level_name, transient=True, status_for_record=status_code)
+            visited_recorded = True
+            reason = f"retry-scheduled: transient status={status_code}"
+            return
+
         state.record_visited(url, status_code)
         visited_recorded = True
 
@@ -548,9 +580,10 @@ def _process_url(state: CrawlerState, session: requests.Session, worker_id: int,
         else:
             reason = f"skipped: canonical url already saved ({canonical_url})"
     except requests.RequestException as exc:
-        reason = f"skipped: request error: {exc}"
+        # Connection errors/timeouts are transport-level hiccups, not judgments about the page retry a few times instead of instantly blacklisting.
+        reason = f"retry-scheduled: request error: {exc}"
         if not visited_recorded:
-            state.record_visited(url, status_code or "request_error")
+            state.note_failure(url, level_name, transient=True, status_for_record=status_code or "request_error")
     except Exception as exc:
         reason = f"skipped: unexpected error: {type(exc).__name__}: {exc}"
         if not visited_recorded:
@@ -567,7 +600,7 @@ def _worker_loop(state: CrawlerState, worker_id: int, timeout: float, checkpoint
     session.headers.update({"User-Agent": USER_AGENT})
     while not state.stop_event.is_set():
         try:
-            url, status = state.claim_next_url()
+            url, status, level_name = state.claim_next_url()
         except Exception as exc:
             # claim_next_url() guards its own risky calls, so this shouldn't fire -
             # but an uncaught exception here would silently kill this thread, and a
@@ -586,7 +619,7 @@ def _worker_loop(state: CrawlerState, worker_id: int, timeout: float, checkpoint
 
         assert url is not None
         try:
-            _process_url(state, session, worker_id, url, timeout)
+            _process_url(state, session, worker_id, url, timeout, level_name)
         except Exception as exc:
             logger.info(f"worker={worker_id} unexpected crash processing {url}: {type(exc).__name__}: {exc}")
 
@@ -619,13 +652,14 @@ def crawl(
     raw_pages_path: str | Path = project_path("data", "raw_pages.json"),
     frontier_path: str | Path = project_path("data", "frontier.json"),
     visited_path: str | Path = project_path("data", "visited.json"),
-    log_path: str | Path = project_path("crawl.log"),
+    log_path: str | Path = project_path("data", "crawl.log"),
     max_pages: int = 20,
     timeout: float = 8.0,
     polite_delay: float = 0.6,
     checkpoint_every: int = 5,
     workers: int = 4,
     fresh: bool = False,
+    max_retries: int = 3,
 ) -> dict[str, Any]:
     """Run the crawl: fetch frontier URLs (frontier_high first, then frontier_low) with `workers` concurrent
     threads, filter/save relevant pages, and persist crawler state."""
@@ -680,6 +714,7 @@ def crawl(
         checkpoint_every=checkpoint_every,
         domain_next_time=domain_next_time,
         elapsed_offset=prior.get("elapsed_seconds_total", 0.0),
+        max_retries=max_retries,
     )
 
     logger.info(
@@ -733,7 +768,7 @@ def crawl(
         )
     elapsed_seconds = time.time() - start_time
 
-    # Merge this run's counts into the running totals so far (prior was read further up.
+    # Merge this run's counts into the running totals so far.
     summary = {
         "step": "crawling",
         "runs_completed": prior.get("runs_completed", 0) + 1,

@@ -17,7 +17,7 @@ def main() -> None:
         "--max-pages",
         dest="max_pages",
         type=int,
-        default=1000,
+        default=10000,
         help=(
             "Maximum number of pages allowed in the saved pages file (raw_pages.json), "
             "counting pages already saved from previous runs. If the file already has "
@@ -41,7 +41,7 @@ def main() -> None:
     parser.add_argument(
         "--checkpoint-every",
         type=int,
-        default=10,
+        default=250,
         help="Write frontier/visited/pages to disk every N attempted fetches, so an interrupted run (Ctrl-C) can be resumed later instead of restarting.",
     )
     parser.add_argument(
