@@ -580,13 +580,13 @@ def render_card(
 
 
 def main() -> None:
-    st.set_page_config(page_title="Tuebingen Search Engine!", layout="wide")
+    st.set_page_config(page_title="Tuebingen Search Engine", layout="wide")
     add_css()
 
     st.markdown(
         """
         <div class="hero">
-          <div class="hero-title">Tuebingen Search Engine</div>
+          <div class="hero-title">Tuebingen Search Engine!</div>
           <div class="hero-subtitle">Explainable local search over English Tuebingen-related pages</div>
         </div>
         """,
