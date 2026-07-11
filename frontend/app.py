@@ -1,11 +1,12 @@
 from __future__ import annotations
 
 import html
+import hashlib
 import re
 import sys
 import time
 from pathlib import Path
-from urllib.parse import urlparse
+from urllib.parse import unquote, urlparse
 
 import streamlit as st
 
@@ -16,6 +17,7 @@ if str(ROOT) not in sys.path:
 from src.preprocessing import preprocess
 from src.retrieval import retrieve
 from src.utils import project_path, read_json
+from llm_summary import generate_llm_summary, gemini_is_configured
 
 
 CATEGORY_RULES = {
@@ -43,6 +45,12 @@ SCORE_LABELS = [
     ("LinkScore", "normalized_link"),
     ("LSA", "normalized_lsa"),
 ]
+
+AI_MODE_OPTIONS = {
+    "Summary + relevance": "relevance",
+    "Summary only": "summary",
+    "Custom focus": "custom",
+}
 
 
 def add_css() -> None:
@@ -150,11 +158,6 @@ def add_css() -> None:
             font-weight: 750;
             min-height: 2.15rem;
         }
-        div[data-testid="stVerticalBlock"]:has(> div[data-testid="stElementContainer"] .result-card-marker) div[data-testid="stButton"] button::before {
-            content: "\\2726";
-            margin-right: .35rem;
-            color: #fbbf24;
-        }
         div[data-testid="stVerticalBlock"]:has(> div[data-testid="stElementContainer"] .result-card-marker) div[data-testid="stButton"] button:hover {
             border-color: #93c5fd;
             background: #1d4ed8;
@@ -205,6 +208,16 @@ def add_css() -> None:
             background: #064e3b;
             border-color: #10b981;
             color: #d1fae5;
+        }
+        .term-found {
+            background: #064e3b;
+            border-color: #10b981;
+            color: #d1fae5;
+        }
+        .term-missing {
+            background: #4c0519;
+            border-color: #fb7185;
+            color: #ffe4e6;
         }
         .rank-badge {
             background: #1d4ed8;
@@ -377,6 +390,30 @@ def highlight(text: str, terms: list[str]) -> str:
     return escaped
 
 
+def direct_query_term_matches(
+    result: dict,
+    doc: dict,
+    body: str,
+    query_terms: list[str],
+) -> tuple[list[str], list[str]]:
+    page_text = " ".join(
+        [
+            result.get("title") or doc.get("title", ""),
+            unquote(result.get("url") or doc.get("url", "")),
+            result.get("snippet") or doc.get("snippet", ""),
+            body,
+        ]
+    ).lower()
+    page_text = page_text.replace("t\u00fcbingen", "tubingen").replace("tuebingen", "tubingen")
+
+    found = []
+    not_found = []
+    for term in dict.fromkeys(query_terms):
+        pattern = rf"(?<![a-z0-9]){re.escape(term.lower())}(?![a-z0-9])"
+        (found if re.search(pattern, page_text) else not_found).append(term)
+    return found, not_found
+
+
 def why_reasons(result: dict, doc: dict, query_tokens: list[str], prf_terms: list[str]) -> list[str]:
     query_set = set(query_tokens)
     score_details = result.get("score_details", {})
@@ -442,14 +479,44 @@ def metric_cards(runtime: float, indexed: int, shown: int) -> None:
         )
 
 
-def render_card(result: dict, doc: dict, body: str, query_terms: list[str], query_tokens: list[str]) -> None:
+def render_card(
+    result: dict,
+    doc: dict,
+    body: str,
+    query_text: str,
+    query_terms: list[str],
+    query_tokens: list[str],
+    ai_mode: str,
+    custom_instruction: str,
+) -> None:
     prf_terms = result.get("expansion_terms", [])
     category = classify_category(result, doc, body)
-    source = source_badge(result.get("url", ""))
+    found_terms, not_found_terms = direct_query_term_matches(result, doc, body, query_terms)
     terms_to_mark = query_terms + prf_terms + result.get("matched_terms", [])
     summary_key = f"summary_{int(result.get('doc_id', -1))}_{int(result.get('rank', 0))}"
+    active_settings_key = f"active_{summary_key}"
+    settings_hash = hashlib.sha1(f"{ai_mode}:{custom_instruction}".encode("utf-8")).hexdigest()[:10]
+    requested_llm_key = f"llm_{summary_key}_{settings_hash}"
+    active_settings_hash = st.session_state.get(active_settings_key)
+    settings_changed = bool(active_settings_hash and active_settings_hash != settings_hash)
+    needs_summary = not active_settings_hash or settings_changed
+    custom_instruction_missing = ai_mode == "custom" and not custom_instruction.strip()
+
     if summary_key not in st.session_state:
         st.session_state[summary_key] = False
+
+    if settings_changed:
+        button_label = "Update Summary"
+        button_icon = ":material/refresh:"
+        button_help = "Generate or load a summary with the current AI settings"
+    elif st.session_state[summary_key]:
+        button_label = "Hide Summary"
+        button_icon = ":material/auto_awesome:"
+        button_help = "Hide the current AI summary"
+    else:
+        button_label = "AI Summary"
+        button_icon = ":material/auto_awesome:"
+        button_help = "Generate or show a Gemini summary"
 
     with st.container(border=True):
         st.markdown('<div class="result-card-marker"></div>', unsafe_allow_html=True)
@@ -464,33 +531,70 @@ def render_card(result: dict, doc: dict, body: str, query_terms: list[str], quer
                     {esc(result.get("title") or result.get("url"))}
                   </div>
                   <a class="result-url" href="{esc(result.get("url", ""))}" target="_blank">{esc(result.get("url", ""))}</a><br>
-                  <span class="badge">Category: {esc(category)}</span>
-                  <span class="badge">Source: {esc(source)}</span>
+                  <span class="badge term-found">Found: {esc(", ".join(found_terms) or "none")}</span>
+                  <span class="badge term-missing">Not found: {esc(", ".join(not_found_terms) or "none")}</span>
                   <span class="badge score-badge">Score {float(result.get("score", 0.0) or 0.0):.3f}</span>
                 </div>
                 """,
                 unsafe_allow_html=True,
             )
         with right:
-            if st.button("AI Summary", key=f"button_{summary_key}", help="Show or hide the local extractive summary", use_container_width=True):
+            summary_clicked = st.button(
+                button_label,
+                key=f"button_{summary_key}",
+                help=button_help,
+                icon=button_icon,
+                disabled=needs_summary and custom_instruction_missing,
+                use_container_width=True,
+            )
+
+        if summary_clicked:
+            if needs_summary:
+                if requested_llm_key not in st.session_state:
+                    with st.spinner("Generating AI summary..."):
+                        st.session_state[requested_llm_key] = generate_llm_summary(
+                            result=result,
+                            doc=doc,
+                            body=body,
+                            query=query_text,
+                            category=category,
+                            secrets=st.secrets,
+                            mode=ai_mode,
+                            custom_instruction=custom_instruction,
+                        )
+                st.session_state[active_settings_key] = settings_hash
+                st.session_state[summary_key] = True
+                active_settings_hash = settings_hash
+            else:
                 st.session_state[summary_key] = not st.session_state[summary_key]
 
-        if st.session_state[summary_key]:
-            summary = cached_smart_summary(
-                int(result.get("doc_id", -1)),
-                " ".join(query_terms),
-                result.get("title") or "",
-                result.get("snippet", ""),
-                body,
-                tuple(prf_terms),
-                category,
-            )
+        if st.session_state[summary_key] and active_settings_hash:
+            active_llm_key = f"llm_{summary_key}_{active_settings_hash}"
+            llm_summary = st.session_state[active_llm_key]
+            summary = llm_summary.text
+            summary_label = "AI Summary"
+            if not summary:
+                summary = cached_smart_summary(
+                    int(result.get("doc_id", -1)),
+                    query_text,
+                    result.get("title") or "",
+                    result.get("snippet", ""),
+                    body,
+                    tuple(prf_terms),
+                    category,
+                )
+                summary_label = "Local Smart Summary"
+
             st.markdown(
                 f"""
-                <div class="summary"><strong>Smart Summary:</strong><br>{highlight(summary, terms_to_mark)}</div>
+                <div class="summary"><strong>{esc(summary_label)}:</strong><br>{highlight(summary, terms_to_mark)}</div>
                 """,
                 unsafe_allow_html=True,
             )
+            if llm_summary.error:
+                st.caption(f"{llm_summary.error} Showing local fallback summary.")
+            elif llm_summary.source:
+                st.caption(f"Summary source: {llm_summary.source}")
 
         st.markdown(
             f"""
@@ -537,6 +641,18 @@ def main() -> None:
         st.header("Search")
         selected_category = st.selectbox("Category", categories)
         top_k = st.slider("Results", 5, 50, 10)
+        with st.expander("AI Settings"):
+            ai_mode_label = st.selectbox("AI response", list(AI_MODE_OPTIONS))
+            ai_mode = AI_MODE_OPTIONS[ai_mode_label]
+            custom_instruction = ""
+            if ai_mode == "custom":
+                custom_instruction = st.text_area(
+                    "What should the summary focus on?",
+                    placeholder="Example: Focus on opening hours and visitor information.",
+                    max_chars=300,
+                )
+                if not custom_instruction.strip():
+                    st.caption("Add a focus instruction. Until then, the standard relevance mode is used.")
 
     query = st.text_input("Search", value="tuebingen attractions", placeholder="Try: food and drinks")
     if not documents:
@@ -565,6 +681,9 @@ def main() -> None:
     with st.sidebar:
         st.divider()
         st.caption(f"Original query: {query}")
+        st.caption("Gemini AI summary")
+        st.write("Configured" if gemini_is_configured(st.secrets) else "Not configured")
+        st.caption(f"AI mode: {ai_mode_label}")
         st.caption("PRF expansion terms")
         st.write(", ".join(prf_terms) if prf_terms else "None")
         st.caption(f"Indexed pages: {len(documents)}")
@@ -579,7 +698,16 @@ def main() -> None:
         return
 
     for result, doc, body in filtered:
-        render_card(result, doc, body, query_terms, query_tokens)
+        render_card(
+            result,
+            doc,
+            body,
+            query,
+            query_terms,
+            query_tokens,
+            ai_mode,
+            custom_instruction,
+        )
 
 
 if __name__ == "__main__":
