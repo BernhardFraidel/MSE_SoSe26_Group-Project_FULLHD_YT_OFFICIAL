@@ -19,48 +19,55 @@ def compute_idf(N, df):
 
 def correct_query_spelling(query_tokens: list[str], index_data: dict, max_distance: int = 2) -> list[str]:
     """
-    Prüft, ob Query-Tokens Tippfehler enthalten.
-    Fangt Fehler im Wortstamm (via Levenshtein) als auch 
-    Tippfehler am Wortende (via Prefix-Matching) ab.
+    Optimierte Rechtschreibkorrektur: Nutzt die Dokumentenhäufigkeit als Tie-Breaker,
+    verhindert Überkorrekturen bei kurzen Wörtern und beachtet Buchstabendreher.
     """
-    # Das bekannte Vokabular aus index.json laden (enthält die Stämme)
-    vocabulary = index_data.get("document_frequencies", {}).keys()
-    
-    if not vocabulary:
-        return query_tokens
+    frequencies = index_data.get("document_frequencies", {})
+    vocabulary = list(frequencies)
 
     corrected_tokens = []
-    
+
     for token in query_tokens:
-        # Wenn das Wort exakt so im Index existiert, übernehmen wir es direkt
-        if token in vocabulary or token == "tubingen" or token.isdigit():
+        # Wenn das Wort im Index existiert, eine Zahl oder "tubingen"
+        if token in frequencies or token == "tubingen" or token.isdigit():
             corrected_tokens.append(token)
             continue
-            
-        best_match = token
-        min_dist = float('inf')
-        found_via_prefix = False
-        
-        for vocab_term in vocabulary:
-            # behandlung von suffix fehlern
-            if token.startswith(vocab_term) and (len(token) - len(vocab_term) <= 4):
-                best_match = vocab_term
-                found_via_prefix = True
-                break
-                
-            # levenshtein korrektur
-            # Performance-Optimierung: Überspringe Wörter mit zu starkem Längenunterschied
-            if abs(len(vocab_term) - len(token)) > max_distance:
-                continue
-                
-            dist = nltk.edit_distance(token, vocab_term)
-            
-            if dist < min_dist and dist <= max_distance:
-                min_dist = dist
-                best_match = vocab_term
-                
-        corrected_tokens.append(best_match)
-        
+
+        # Schutz vor Überkorrektur bei sehr kurzen Wörtern
+        if len(token) <= 3:
+            corrected_tokens.append(token)
+            continue
+
+        # Adaptive Distanz: Bei kürzeren Wörtern max. 1 Fehler
+        allowed_distance = 1 if len(token) <= 5 else max_distance
+
+        # Vorfilterung für Performance: Nur Wörter gleicher Länge und gleichem Anfangsbuchstaben
+        candidates = [
+            term
+            for term in vocabulary
+            if term
+            and term[0] == token[0]
+            and abs(len(term) - len(token)) <= allowed_distance
+        ]
+
+        matches = []
+        for term in candidates:
+            # Damerau-Levenshtein
+            distance = nltk.edit_distance(
+                token,
+                term,
+                transpositions=True,
+            )
+            if distance <= allowed_distance:
+                # bei gleicher Distanz das häufigste Wort gewinnt
+                matches.append((distance, -frequencies.get(term, 0), term))
+
+        if matches:
+            # Nimmt das Wort mit der kleinsten Distanz (und bei Gleichstand der höchsten Frequenz)
+            corrected_tokens.append(min(matches)[2])
+        else:
+            corrected_tokens.append(token)
+
     return corrected_tokens
 
 def retrieve(query, index, top_k=100, k1=1.2, b=0.75):
