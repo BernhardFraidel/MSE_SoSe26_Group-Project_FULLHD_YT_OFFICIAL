@@ -17,54 +17,96 @@ def compute_idf(N, df):
     """
     return math.log(1.0 + (N - df + 0.5) / (df + 0.5))
 
+_CACHE = {}
+
+def _get_prepared_index(index):
+    """
+    Lädt den Index und baut alle Lookups und die Rechtschreib-Buckets.
+    Nutzt Caching für Speed-up.
+    """
+    cache_key = index if isinstance(index, str) else id(index)
+    
+    if cache_key in _CACHE:
+        return _CACHE[cache_key]
+
+    # nur einmal json laden für speedup
+    if isinstance(index, str):
+        with open(index, 'r', encoding='utf-8') as f:
+            index_data = json.load(f)
+    else:
+        index_data = index
+
+    documents = index_data.get("documents", [])
+    frequencies = index_data.get("document_frequencies", {})
+    
+    # Lookups BM25-Berechnung vorbauen
+    doc_lengths = {doc["doc_id"]: doc.get("doc_length", 1) for doc in documents}
+    doc_metadata = {doc["doc_id"]: doc for doc in documents}
+
+    # Rechtschreib-Buckets vorbauen (Anfangsbuchstabe und Länge)
+    spelling_buckets = defaultdict(list)
+    for term, freq in frequencies.items():
+        if term:
+            spelling_buckets[(term[0], len(term))].append((term, freq))
+            
+    # Für schnelles Tie-Breaking direkt nach Häufigkeit absteigend sortieren
+    for key in spelling_buckets:
+        spelling_buckets[key].sort(key=lambda x: x[1], reverse=True)
+
+    # Im Cache speichern
+    prepared_data = (index_data, doc_lengths, doc_metadata, frequencies, spelling_buckets)
+    _CACHE[cache_key] = prepared_data
+    _CACHE[id(index_data)] = prepared_data  # Verhindert Cache-Miss
+    
+    return prepared_data
+
 def correct_query_spelling(query_tokens: list[str], index_data: dict, max_distance: int = 2) -> list[str]:
     """
-    Optimierte Rechtschreibkorrektur: Nutzt die Dokumentenhäufigkeit als Tie-Breaker,
-    verhindert Überkorrekturen bei kurzen Wörtern und beachtet Buchstabendreher.
+    Rechtschreibkorrektur mit O(1)-Bucket-Lookups und Frequenz-Tie-Breaking.
     """
-    frequencies = index_data.get("document_frequencies", {})
-    vocabulary = list(frequencies)
-
+    # Holt sich buckets aus dem Cache
+    _, _, _, frequencies, spelling_buckets = _get_prepared_index(index_data)
+    
     corrected_tokens = []
 
     for token in query_tokens:
-        # Wenn das Wort im Index existiert, eine Zahl oder "tubingen"
-        if token in frequencies or token == "tubingen" or token.isdigit():
+        # O(1) Hash-Lookup für existierende oder kurze Wörter
+        if token in frequencies or token == "tubingen" or token.isdigit() or len(token) <= 3:
             corrected_tokens.append(token)
             continue
 
-        # Schutz vor Überkorrektur bei sehr kurzen Wörtern
-        if len(token) <= 3:
-            corrected_tokens.append(token)
-            continue
-
-        # Adaptive Distanz: Bei kürzeren Wörtern max. 1 Fehler
         allowed_distance = 1 if len(token) <= 5 else max_distance
+        t_len = len(token)
+        t_char = token[0]
 
-        # Vorfilterung für Performance: Nur Wörter gleicher Länge und gleichem Anfangsbuchstaben
-        candidates = [
-            term
-            for term in vocabulary
-            if term
-            and term[0] == token[0]
-            and abs(len(term) - len(token)) <= allowed_distance
-        ]
+        # Nur realistische Kandidaten
+        candidates = []
+        for length_diff in range(-allowed_distance, allowed_distance + 1):
+            bucket = spelling_buckets.get((t_char, t_len + length_diff), [])
+            candidates.extend(bucket)
 
-        matches = []
-        for term in candidates:
-            # Damerau-Levenshtein
-            distance = nltk.edit_distance(
-                token,
-                term,
-                transpositions=True,
-            )
-            if distance <= allowed_distance:
-                # bei gleicher Distanz das häufigste Wort gewinnt
-                matches.append((distance, -frequencies.get(term, 0), term))
+        if not candidates:
+            corrected_tokens.append(token)
+            continue
 
-        if matches:
-            # Nimmt das Wort mit der kleinsten Distanz (und bei Gleichstand der höchsten Frequenz)
-            corrected_tokens.append(min(matches)[2])
+        # Levenshtein auf reduzierte anzahl
+        best_term = None
+        min_dist = allowed_distance + 1
+        best_freq = -1
+
+        for term, freq in candidates:
+            if min_dist == 1 and freq <= best_freq:
+                continue
+
+            distance = nltk.edit_distance(token, term, transpositions=True)
+            
+            if distance < min_dist or (distance == min_dist and freq > best_freq):
+                min_dist = distance
+                best_term = term
+                best_freq = freq
+
+        if best_term and min_dist <= allowed_distance:
+            corrected_tokens.append(best_term)
         else:
             corrected_tokens.append(token)
 
@@ -81,17 +123,11 @@ def retrieve(query, index, top_k=100, k1=1.2, b=0.75):
     :param b: BM25 Längennormalisierungsparameter (Standard: 0.75)
     :return: Ein Dictionary mit Query-Infos und den Top-100-Kandidaten
     """
-    # Index laden
-    if isinstance(index, str):
-        with open(index, 'r', encoding='utf-8') as f:
-            index_data = json.load(f)
-    else:
-        index_data = index
+    # nutzt den cach für schnelleres laden
+    index_data, doc_lengths, doc_metadata, doc_frequencies, _ = _get_prepared_index(index)
 
-    # Globale Index-Statistiken extrahieren
     documents = index_data.get("documents", [])
     inverted_index = index_data.get("inverted_index", {})
-    doc_frequencies = index_data.get("document_frequencies", {})
     avgdl = index_data.get("average_document_length", 1.0)
     
     # Gesamtanzahl der Dokumente (N)
@@ -99,15 +135,6 @@ def retrieve(query, index, top_k=100, k1=1.2, b=0.75):
     if N == 0:
         return {"query": query, "query_tokens": [], "candidates": []}
 
-    # Lookup-Dictionary für Dokumentenlängen (|D|) und Metadaten
-    doc_lengths = {}
-    doc_metadata = {}
-    for doc in documents:
-        doc_id = doc["doc_id"]
-        doc_lengths[doc_id] = doc.get("doc_length", 1)
-        doc_metadata[doc_id] = doc
-
-    # Query preprozessieren
     query_tokens = preprocess(query)
     query_tokens = correct_query_spelling(query_tokens, index_data)
 
