@@ -17,9 +17,10 @@ if str(ROOT) not in sys.path:
 from src.preprocessing import preprocess
 from src.reranking import rerank
 from src.retrieval import retrieve
-from src.utils import project_path, read_json
+from src.utils import project_path
 from llm_summary import generate_llm_summary, gemini_is_configured
 from loading_animation import water_cooling_loader
+from storage_data import INDEX_OBJECT, RAW_PAGES_OBJECT, StorageDataError, load_json_source
 
 SCORE_LABELS = [
     ("BM25", "normalized_bm25"),
@@ -80,6 +81,7 @@ def add_css() -> None:
             border-radius: 12px;
             background: #111827;
             padding: .85rem .95rem;
+            position: relative;
         }
         .metric-label {
             color: #94a3b8;
@@ -91,6 +93,13 @@ def add_css() -> None:
             color: #f8fafc;
             font-size: 1.35rem;
             font-weight: 800;
+        }
+        .metric-source {
+            color: #64748b;
+            font-size: .68rem;
+            position: absolute;
+            right: .75rem;
+            top: .65rem;
         }
         div[data-testid="stTextInput"] div[data-baseweb="input"] {
             position: relative;
@@ -249,14 +258,17 @@ def file_mtime(*parts: str) -> float:
 
 
 @st.cache_resource(show_spinner=False)
-def load_index(index_mtime: float) -> dict:
+def load_index(index_mtime: float) -> tuple[dict, str, str]:
     _ = index_mtime
-    return read_json(project_path("data", "index.json"), {})
+    try:
+        return load_json_source(project_path("data", "index.json"), INDEX_OBJECT, st.secrets)
+    except StorageDataError as exc:
+        return {}, "unavailable", str(exc)
 
 
 @st.cache_data(show_spinner=False)
 def cached_retrieve(query: str, top_k: int, index_mtime: float) -> dict:
-    index = load_index(index_mtime)
+    index = load_index(index_mtime)[0]
     first_stage = retrieve(query, index, top_k=top_k)
     reranked = rerank(first_stage, index)
     return {
@@ -308,10 +320,19 @@ def cached_smart_summary(
     return smart_summary(result, body, query_terms, list(prf_terms))
 
 
-@st.cache_data(show_spinner=False)
-def raw_body_lookup() -> dict[int, str]:
-    raw_pages = read_json(project_path("data", "raw_pages.json"), {"pages": []})
-    return {int(page.get("doc_id", -1)): page.get("body", "") for page in raw_pages.get("pages", [])}
+@st.cache_resource(show_spinner=False)
+def raw_body_lookup(raw_pages_mtime: float) -> tuple[dict[int, str], str, str]:
+    _ = raw_pages_mtime
+    try:
+        raw_pages, source, warning = load_json_source(
+            project_path("data", "raw_pages.json"),
+            RAW_PAGES_OBJECT,
+            st.secrets,
+        )
+    except StorageDataError as exc:
+        return {}, "unavailable", str(exc)
+    bodies = {int(page.get("doc_id", -1)): page.get("body", "") for page in raw_pages.get("pages", [])}
+    return bodies, source, warning
 
 
 def split_sentences(text: str) -> list[str]:
@@ -452,15 +473,21 @@ def format_runtime(seconds: float) -> str:
     return f"{seconds:.3f}s"
 
 
-def metric_cards(runtime: float, indexed: int, shown: int) -> None:
+def metric_cards(runtime: float, indexed: int, shown: int, index_source: str) -> None:
     cols = st.columns(3)
-    values = [("Search time", format_runtime(runtime)), ("Indexed pages", indexed), ("Shown results", shown)]
-    for col, (label, value) in zip(cols, values):
+    source_label = "Supabase Storage" if index_source == "Supabase Storage" else "Local file"
+    values = [
+        ("Search time", format_runtime(runtime), ""),
+        ("Indexed pages", indexed, source_label),
+        ("Shown results", shown, ""),
+    ]
+    for col, (label, value, source) in zip(cols, values):
         col.markdown(
             f"""
             <div class="metric-card">
               <div class="metric-label">{esc(label)}</div>
               <div class="metric-value">{esc(value)}</div>
+              {f'<div class="metric-source">{esc(source)}</div>' if source else ''}
             </div>
             """,
             unsafe_allow_html=True,
@@ -471,6 +498,7 @@ def render_card(
     result: dict,
     doc: dict,
     body: str,
+    raw_pages_mtime: float,
     query_text: str,
     query_terms: list[str],
     query_tokens: list[str],
@@ -492,6 +520,7 @@ def render_card(
     active_settings_key = f"active_{summary_key}"
     settings_hash = hashlib.sha1(f"{ai_mode}:{custom_instruction}".encode("utf-8")).hexdigest()[:10]
     requested_llm_key = f"llm_{summary_key}_{settings_hash}"
+    storage_warning_key = f"storage_warning_{summary_key}_{settings_hash}"
     active_settings_hash = st.session_state.get(active_settings_key)
     settings_changed = bool(active_settings_hash and active_settings_hash != settings_hash)
     needs_summary = not active_settings_hash or settings_changed
@@ -548,11 +577,17 @@ def render_card(
         if summary_clicked:
             if needs_summary:
                 if requested_llm_key not in st.session_state:
+                    summary_body = body
+                    if not summary_body:
+                        raw_bodies, _raw_source, raw_warning = raw_body_lookup(raw_pages_mtime)
+                        summary_body = raw_bodies.get(int(result.get("doc_id", -1)), "")
+                        if raw_warning:
+                            st.session_state[storage_warning_key] = raw_warning
                     with water_cooling_loader(cooling_placeholder):
                         st.session_state[requested_llm_key] = generate_llm_summary(
                             result=result,
                             doc=doc,
-                            body=body,
+                            body=summary_body,
                             query=query_text,
                             secrets=st.secrets,
                             mode=ai_mode,
@@ -571,12 +606,18 @@ def render_card(
             summary = llm_summary.text
             summary_label = "AI Summary"
             if not summary:
+                fallback_body = body
+                if not fallback_body:
+                    fallback_body = raw_body_lookup(raw_pages_mtime)[0].get(
+                        int(result.get("doc_id", -1)),
+                        "",
+                    )
                 summary = cached_smart_summary(
                     int(result.get("doc_id", -1)),
                     query_text,
                     result.get("title") or "",
                     result.get("snippet", ""),
-                    body,
+                    fallback_body,
                     tuple(prf_terms),
                 )
                 summary_label = "Local Smart Summary"
@@ -591,6 +632,8 @@ def render_card(
                 st.caption(f"{llm_summary.error} Showing local fallback summary.")
             elif llm_summary.source:
                 st.caption(f"Summary source: {llm_summary.source}")
+            if st.session_state.get(storage_warning_key):
+                st.caption(st.session_state[storage_warning_key])
 
         st.markdown(
             f"""
@@ -624,10 +667,13 @@ def main() -> None:
     )
 
     index_mtime = file_mtime("data", "index.json")
-    index = load_index(index_mtime)
+    raw_pages_mtime = file_mtime("data", "raw_pages.json")
+    index, index_source, index_warning = load_index(index_mtime)
     documents = index.get("documents", [])
     docs = doc_lookup(index)
-    bodies = raw_body_lookup()
+
+    if index_warning:
+        st.warning(index_warning)
 
     with st.sidebar:
         st.header("Search")
@@ -667,8 +713,7 @@ def main() -> None:
     prepared_results = []
     for result in results:
         doc = docs.get(int(result.get("doc_id", -1)), {})
-        body = bodies.get(int(result.get("doc_id", -1)), "")
-        prepared_results.append((result, doc, body))
+        prepared_results.append((result, doc, ""))
 
     with st.sidebar:
         st.divider()
@@ -691,7 +736,7 @@ def main() -> None:
         st.caption(f"Search time: {format_runtime(runtime)}")
         st.caption(f"Shown results: {len(prepared_results)}")
 
-    metric_cards(runtime, len(documents), len(prepared_results))
+    metric_cards(runtime, len(documents), len(prepared_results), index_source)
 
     if not prepared_results:
         st.warning("No results found for this query.")
@@ -702,6 +747,7 @@ def main() -> None:
             result,
             doc,
             body,
+            raw_pages_mtime,
             query,
             query_terms,
             query_tokens,
