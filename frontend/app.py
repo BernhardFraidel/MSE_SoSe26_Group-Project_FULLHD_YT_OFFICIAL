@@ -248,7 +248,7 @@ def file_mtime(*parts: str) -> float:
     return path.stat().st_mtime if path.exists() else 0.0
 
 
-@st.cache_data(show_spinner=False)
+@st.cache_resource(show_spinner=False)
 def load_index(index_mtime: float) -> dict:
     _ = index_mtime
     return read_json(project_path("data", "index.json"), {})
@@ -256,8 +256,7 @@ def load_index(index_mtime: float) -> dict:
 
 @st.cache_data(show_spinner=False)
 def cached_retrieve(query: str, top_k: int, index_mtime: float) -> dict:
-    _ = index_mtime
-    index = read_json(project_path("data", "index.json"), {})
+    index = load_index(index_mtime)
     first_stage = retrieve(query, index, top_k=top_k)
     reranked = rerank(first_stage, index)
     return {
