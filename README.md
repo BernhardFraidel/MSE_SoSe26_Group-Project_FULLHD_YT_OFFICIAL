@@ -374,9 +374,16 @@ Optional internal JSON summary for `data/batch_summary.json`:
 
 ```json
 {
-  "step": "batch_retrieval_summary",
-  "query_count": 1,
-  "total_results": 1,
+  "step": "batch_retrieval",
+  "input_path": "queries.tsv",
+  "index_path": "data/index.json",
+  "output_path": "data/results.tsv",
+  "summary_output_path": "data/batch_summary.json",
+  "query_count": 2,
+  "total_results": 200,
+  "top_k": 100,
+  "use_reranking": true,
+  "elapsed_seconds": 1.85,
   "average_runtime_seconds": 0.05
 }
 ```
