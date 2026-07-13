@@ -228,10 +228,14 @@ def add_css() -> None:
             border-color: #fb7185;
             color: #ffe4e6;
         }
-        .term-corrected {
+        .search-correction {
+            margin: .35rem 0 .7rem 0;
+            padding: .48rem .7rem;
+            border: 1px solid #3b82f6;
+            border-radius: 8px;
             background: #172554;
-            border-color: #60a5fa;
             color: #dbeafe;
+            font-size: .85rem;
         }
         .rank-badge {
             background: #1d4ed8;
@@ -545,20 +549,12 @@ def render_card(
     raw_pages_mtime: float,
     query_text: str,
     query_terms: list[str],
-    query_tokens: list[str],
     corrected_query_tokens: list[str],
     ai_mode: str,
     custom_instruction: str,
 ) -> None:
     prf_terms = result.get("expansion_terms", [])
     found_terms, not_found_terms = direct_query_term_matches(result, doc, body, query_terms)
-    corrections = spelling_corrections(query_terms, query_tokens, corrected_query_tokens)
-    correction_text = ", ".join(f"{original} -> {corrected}" for original, corrected in corrections)
-    correction_badge = (
-        f'<span class="badge term-corrected">Corrected search: {esc(correction_text)}</span>'
-        if correction_text
-        else ""
-    )
     terms_to_mark = query_terms + prf_terms + result.get("matched_terms", [])
     query_hash = hashlib.sha1(query_text.encode("utf-8")).hexdigest()[:10]
     summary_key = f"summary_{int(result.get('doc_id', -1))}_{query_hash}"
@@ -603,7 +599,7 @@ def render_card(
                   <div class="badge-row">
                     <span class="badge term-found">Found: {esc(", ".join(found_terms) or "none")}</span>
                     <span class="badge term-missing">Not found: {esc(", ".join(not_found_terms) or "none")}</span>
-                    {correction_badge}<span class="badge score-badge">Score {float(result.get("score", 0.0) or 0.0):.3f}</span>
+                    <span class="badge score-badge">Score {float(result.get("score", 0.0) or 0.0):.3f}</span>
                   </div>
                 </div>
                 """,
@@ -755,6 +751,16 @@ def main() -> None:
     corrections = spelling_corrections(query_terms, query_tokens, corrected_query_tokens)
     prf_terms = results[0].get("expansion_terms", []) if results else []
 
+    if corrections:
+        correction_text = ", ".join(
+            f"{esc(original)} &rarr; {esc(corrected)}" for original, corrected in corrections
+        )
+        st.markdown(
+            f'<div class="search-correction"><strong>Spelling corrected:</strong> '
+            f'Searching for {correction_text}</div>',
+            unsafe_allow_html=True,
+        )
+
     raw_bodies, _raw_source, raw_warning = raw_body_lookup(raw_pages_mtime)
     if raw_warning:
         st.warning(f"{raw_warning} Found-term badges are using title, URL, and snippet only.")
@@ -778,17 +784,6 @@ def main() -> None:
             label for label, key in SCORE_LABELS if key in active_score_keys
         ]
         active_ranking_text = " + ".join(active_ranking_labels) or "No ranking details"
-        correction_item = ""
-        if corrections:
-            correction_text = ", ".join(
-                f"{original} -> {corrected}" for original, corrected in corrections
-            )
-            correction_item = f"""
-              <div class="sidebar-item">
-                <div class="sidebar-label">Spelling correction</div>
-                <div class="sidebar-value">{esc(correction_text)}</div>
-              </div>
-            """
         st.markdown(
             f"""
             <div class="sidebar-section">
@@ -827,7 +822,6 @@ def main() -> None:
                 <div class="sidebar-label">Active ranking</div>
                 <div class="sidebar-value">{esc(active_ranking_text)}</div>
               </div>
-              {correction_item}
             </div>
             """,
             unsafe_allow_html=True,
@@ -847,7 +841,6 @@ def main() -> None:
             raw_pages_mtime,
             query,
             query_terms,
-            query_tokens,
             corrected_query_tokens,
             ai_mode,
             custom_instruction,
