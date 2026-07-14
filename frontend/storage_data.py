@@ -14,6 +14,7 @@ import requests
 INDEX_OBJECT = "index.json.gz"
 RAW_PAGES_OBJECT = "raw_pages.json.gz"
 DOWNLOAD_TIMEOUT = (10, 120)
+MAX_OBJECT_PARTS = 100
 
 
 class StorageDataError(RuntimeError):
@@ -67,7 +68,11 @@ def _read_local_json(path: Path) -> dict:
         return _read_json_stream(handle, compressed)
 
 
-def _download_json(settings: StorageSettings, object_name: str) -> dict:
+def _download_bytes(
+    settings: StorageSettings,
+    object_name: str,
+    allow_missing: bool = False,
+) -> bytes | None:
     bucket = quote(settings.bucket, safe="")
     object_path = quote(object_name, safe="/")
     url = f"{settings.url}/storage/v1/object/authenticated/{bucket}/{object_path}"
@@ -82,13 +87,33 @@ def _download_json(settings: StorageSettings, object_name: str) -> dict:
     except requests.RequestException as exc:
         raise StorageDataError(f"Could not reach Supabase Storage for {object_name}.") from exc
 
+    if allow_missing and response.status_code in (400, 404):
+        try:
+            error_data = response.json()
+        except ValueError:
+            error_data = {}
+        if response.status_code == 404 or error_data.get("error") == "not_found":
+            return None
     if response.status_code != 200:
         raise StorageDataError(
             f"Supabase Storage could not load {object_name} (HTTP {response.status_code})."
         )
+    return response.content
+
+
+def _download_json(settings: StorageSettings, object_name: str) -> dict:
+    parts = []
+    for part_number in range(1, MAX_OBJECT_PARTS + 1):
+        part_name = f"{object_name}.part{part_number:03d}"
+        part = _download_bytes(settings, part_name, allow_missing=True)
+        if part is None:
+            break
+        parts.append(part)
+
+    payload = b"".join(parts) if parts else _download_bytes(settings, object_name)
 
     try:
-        return _read_json_stream(io.BytesIO(response.content), object_name.endswith(".gz"))
+        return _read_json_stream(io.BytesIO(payload), object_name.endswith(".gz"))
     except (OSError, UnicodeError, json.JSONDecodeError) as exc:
         raise StorageDataError(f"Stored object {object_name} is not valid JSON data.") from exc
 
