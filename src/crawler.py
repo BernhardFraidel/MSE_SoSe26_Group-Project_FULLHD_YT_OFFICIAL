@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import heapq
 import logging
+import re
 import random
 import threading
 import time
@@ -28,6 +29,35 @@ from src.utils import (
 
 
 USER_AGENT = "MSE-Tuebingen-StudentCrawler | Contact: janis.weller@student.uni-tuebingen.de"
+
+# Domains we never want to fetch or queue.
+BLACKLISTED_DOMAINS: frozenset[str] = frozenset({
+    "archive.org",
+})
+
+# Regex
+_EMAIL_RE = re.compile(r"[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}")
+_TUEBINGEN_RE = re.compile(
+    r"""
+    t                                    # leading 't'
+    (?:
+        [ue\u00fc]{1,6}                  # vowel-only fuzzy match: u, ue, uu, uuuu, ü ...
+      | &\#?x?[0-9a-z]{2,6};             # un-decoded HTML entity: &uuml; &#252; &#xfc;
+      | (?:%[0-9a-f]{2}){2}              # un-decoded percent-encoded UTF-8 bytes for ü/Ü
+    )
+    bingen
+    """,
+    re.IGNORECASE | re.VERBOSE,
+)
+
+
+def _is_blacklisted_domain(domain: str) -> bool:
+    """True if `domain` is (or is a subdomain of) a blacklisted domain."""
+    domain = domain.lower()
+    return any(domain == blocked or domain.endswith("." + blocked) for blocked in BLACKLISTED_DOMAINS)
+
+# How often (seconds) an idle worker is allowed to log a "still waiting" heartbeat.
+_IDLE_HEARTBEAT_INTERVAL = 20.0
 
 # HTTP statuses worth retrying rather than permanently blacklisting the URL
 _TRANSIENT_STATUS_CODES = {429, 500, 502, 503, 504}
@@ -78,9 +108,11 @@ def _extract_links(soup: BeautifulSoup, base_url: str) -> list[str]:
     """Pull all usable HTML links out of a parsed page, normalized against the base URL."""
     links = []
     for tag in soup.find_all("a", href=True):
-        href = tag.get("href", "")
-        # Skip non-navigable links (email, phone, inline scripts)
-        if href.startswith(("mailto:", "tel:", "javascript:")):
+        href = tag.get("href", "").strip()
+        # Skip non-navigable links (email, phone, inline scripts).
+        if href.lower().startswith(("mailto:", "tel:", "javascript:", "sms:", "fax:")):
+            continue
+        if _EMAIL_RE.fullmatch(href):
             continue
         # Resolve relative links to absolute URLs and keep only likely HTML pages
         normalized = normalize_url(href, base_url)
@@ -120,11 +152,7 @@ def _detect_language(text: str, html_lang: str) -> str:
 def _is_tuebingen_related(url: str, title: str, body: str) -> bool:
     """Check whether the URL, title, or body text mentions Tuebingen in any common spelling variant."""
     text = f"{url} {title} {body}".lower()
-    return (
-        "tuebingen" in text
-        or "tübingen" in text
-        or "tubingen" in text
-    )
+    return bool(_TUEBINGEN_RE.search(text))
 
 
 def _looks_english(url: str, language: str, body: str) -> bool:
@@ -231,6 +259,9 @@ class CrawlerState:
             # Malformed URL - drop it rather than let it poison the frontier.
             return
 
+        if _is_blacklisted_domain(domain) or not is_probably_html_url(url):
+            return
+
         queue = level.domains.get(domain)
         if queue is None:
             queue = deque()
@@ -334,6 +365,20 @@ class CrawlerState:
                 return None, "done", None
             return None, "wait", None
 
+    def frontier_status_summary(self) -> str:
+        """Human-readable snapshot of frontier size/domain diversity, used for idle-worker heartbeats."""
+        with self.lock:
+            now = time.time()
+            domains_high = len(self.frontier_high.domains)
+            domains_low = len(self.frontier_low.domains)
+            ready_high = sum(1 for d in self.frontier_high.domains if self.domain_next_time.get(d, 0.0) <= now)
+            ready_low = sum(1 for d in self.frontier_low.domains if self.domain_next_time.get(d, 0.0) <= now)
+            return (
+                f"frontier_high={self._frontier_size(self.frontier_high)} urls/{domains_high} domains ({ready_high} ready), "
+                f"frontier_low={self._frontier_size(self.frontier_low)} urls/{domains_low} domains ({ready_low} ready), "
+                f"in_flight={self.in_flight}"
+            )
+
     def seconds_until_next_domain(self) -> float:
         """How long a worker should sleep before it's worth calling claim_next_url() again."""
         with self.lock:
@@ -357,10 +402,11 @@ class CrawlerState:
             if candidate > self.domain_next_time.get(domain, 0.0):
                 self.domain_next_time[domain] = candidate
 
-    def add_links(self, links: list[str], is_related: bool) -> None:
-        """Queue newly discovered links. If the page they were found on is Tuebingen-related they go into frontier_high; otherwise frontier_low."""
+    def add_links(self, links: list[str], qualifies_for_high: bool) -> None:
+        """Queue newly discovered links. If the page they were found on is both Tuebingen-related AND English,
+        they go into frontier_high; otherwise frontier_low."""
         with self.lock:
-            target_level = self.frontier_high if is_related else self.frontier_low
+            target_level = self.frontier_high if qualifies_for_high else self.frontier_low
             for link in links:
                 if (
                     link not in self.visited_urls
@@ -399,9 +445,7 @@ class CrawlerState:
 
         Note: this does NOT reject a save just because max_pages was already reached. A worker
         may have already fetched and parsed a page by the time another worker's save hits the cap and sets
-        stop_event. Discarding that already- completed page would silently waste the work and drop content
-        wed otherwise want, so it is saved anyway. This means the file can end up with a few more pages than max_pages,
-        bounded by roughly the number of workers that were in-flight at the moment the cap was hit.
+        stop_event. In-flight pages will get saved over the cap.
         """
         with self.lock:
             canonical_key = _url_key(canonical_url)
@@ -428,7 +472,7 @@ class CrawlerState:
             parser = urllib.robotparser.RobotFileParser()
             parser.set_url(robots_url)
             try:
-                response = session.get(robots_url, timeout=timeout)
+                response = _fetch_with_hard_timeout(session, robots_url, timeout)
             except requests.RequestException:
                 # If robots.txt can't be fetched within the timeout, default to allowing the crawl
                 return True
@@ -452,7 +496,8 @@ class CrawlerState:
             return False
         with self.lock:
             if self.attempted >= self.next_checkpoint_at:
-                self.next_checkpoint_at += self.checkpoint_every
+                # Snap forward past the current attempted count so that a burst of workers finishing at once.
+                self.next_checkpoint_at = self.attempted + self.checkpoint_every
                 return True
             return False
 
@@ -510,6 +555,28 @@ def _save_state(
     write_json(visited_path, {"visited": visited_entries})
 
 
+def _fetch_with_hard_timeout(session: requests.Session, url: str, timeout: float, **kwargs: Any) -> requests.Response:
+    """Run session.get() in a background daemon thread and enforce a hard wall-clock deadline."""
+    outcome: dict[str, Any] = {}
+    done = threading.Event()
+
+    def _do_get() -> None:
+        try:
+            outcome["response"] = session.get(url, timeout=timeout, **kwargs)
+        except Exception as exc:  # re-raised on the caller's thread below
+            outcome["error"] = exc
+        finally:
+            done.set()
+
+    threading.Thread(target=_do_get, daemon=True, name="crawler-fetch").start()
+    # Small grace period on top of requests' own timeout so genuine (non-stuck) slow connect/read timeouts have a chance to raise and be reported as their real error.
+    if not done.wait(timeout=timeout + 1):
+        raise requests.Timeout(f"hard timeout ({timeout + 1:.0f}s) exceeded while fetching {url}")
+    if "error" in outcome:
+        raise outcome["error"]
+    return outcome["response"]
+
+
 def _process_url(state: CrawlerState, session: requests.Session, worker_id: int, url: str, timeout: float, level_name: str | None) -> None:
     """Fetch, parse, and (maybe) save a single URL. Always releases the URL's in-flight/cooldown slot when done."""
     domain = "unknown"
@@ -524,7 +591,7 @@ def _process_url(state: CrawlerState, session: requests.Session, worker_id: int,
             reason = "skipped: blocked by robots.txt"
             return
 
-        response = session.get(url, timeout=timeout, allow_redirects=True)
+        response = _fetch_with_hard_timeout(session, url, timeout, allow_redirects=True)
         status_code = response.status_code
         fetched_url = normalize_url(response.url)
         content_type = response.headers.get("content-type", "")
@@ -552,12 +619,19 @@ def _process_url(state: CrawlerState, session: requests.Session, worker_id: int,
         html_lang = soup.html.get("lang", "") if soup.html else ""
         language = _detect_language(body, html_lang)
         is_related = _is_tuebingen_related(canonical_url, title, body)
+        is_english = _looks_english(canonical_url, language, body)
 
         # Queue newly discovered links for later, regardless of whether this page is saved.
-        state.add_links(outgoing_links, is_related)
+        # Only pages that are both Tuebingen-related AND English promote their links to frontier_high.
+        state.add_links(outgoing_links, is_related and is_english)
 
-        if not is_related or not _looks_english(canonical_url, language, body):
-            reason = "skipped: not tuebingen-related or not english"
+        if not is_related or not is_english:
+            skip_reasons = []
+            if not is_related:
+                skip_reasons.append("not tuebingen-related")
+            if not is_english:
+                skip_reasons.append(f"not english (detected={language})")
+            reason = f"skipped: {' + '.join(skip_reasons)}"
             return
 
         page = {
@@ -597,7 +671,11 @@ def _process_url(state: CrawlerState, session: requests.Session, worker_id: int,
 def _worker_loop(state: CrawlerState, worker_id: int, timeout: float, checkpoint_paths: tuple[Path, Path, Path]) -> None:
     """Main loop for a single worker thread: repeatedly claim a ready URL and process it."""
     session = requests.Session()
-    session.headers.update({"User-Agent": USER_AGENT})
+    session.headers.update({
+        "User-Agent": USER_AGENT,
+        "Accept-Language": "en;q=1.0, de;q=0.2",
+    })
+    last_heartbeat = 0.0
     while not state.stop_event.is_set():
         try:
             url, status, level_name = state.claim_next_url()
@@ -614,7 +692,15 @@ def _worker_loop(state: CrawlerState, worker_id: int, timeout: float, checkpoint
             return
         if status == "wait":
             # Nothing is ready right now (either the frontier is empty but other workers are still in-flight and might add to it, or every candidate domain is on cooldown).
-            time.sleep(max(0.01, state.seconds_until_next_domain()))
+            wait_seconds = state.seconds_until_next_domain()
+            now = time.time()
+            if now - last_heartbeat >= _IDLE_HEARTBEAT_INTERVAL:
+                last_heartbeat = now
+                logger.info(
+                    f"worker={worker_id} idle: waiting up to {wait_seconds:.1f}s for a domain cooldown to clear "
+                    f"({state.frontier_status_summary()})"
+                )
+            time.sleep(max(0.01, wait_seconds))
             continue
 
         assert url is not None
@@ -624,7 +710,8 @@ def _worker_loop(state: CrawlerState, worker_id: int, timeout: float, checkpoint
             logger.info(f"worker={worker_id} unexpected crash processing {url}: {type(exc).__name__}: {exc}")
 
         try:
-            if state.should_checkpoint():
+            # Once shutdown has started, skip periodic checkpointing here. crawl() already performs one final save after all workers join.
+            if not state.stop_event.is_set() and state.should_checkpoint():
                 with state.checkpoint_lock:
                     raw_pages_path, frontier_path, visited_path = checkpoint_paths
                     pages, frontier_high, frontier_low, domain_next_time, visited_entries = state.snapshot_for_checkpoint()
@@ -745,7 +832,8 @@ def crawl(
         state.interrupted = True
         state.stop_event.set()
         logger.info("interrupted by user (Ctrl-C) - waiting for in-flight requests to finish, then saving progress so the crawl can be resumed later")
-        join_deadline = timeout + 2
+        # A worker's in-flight request can involve up to two hard-bounded fetches in sequence (robots.txt and the page itself).
+        join_deadline = 2 * (timeout + 1) + 2
         for t in threads:
             t.join(timeout=join_deadline)
             if t.is_alive():

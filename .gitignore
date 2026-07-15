@@ -5,6 +5,9 @@
 data/*.json
 data/*.jsonl
 data/*.tmp
+data_baseline/*
+data_regex/*
+data_regex_harsh/*
 
 
 # Byte-compiled / optimized / DLL files
